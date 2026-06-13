@@ -38,13 +38,13 @@ def send_kqml_ask(gaps: List[GapSlot]) -> Dict[str, Any]:
 
     payload = JSONSerializer.to_dict(msg)
 
-    log.info("       │ KQML ask built")
-    log.info("       │ reply_with  : %s", msg.reply_with)
-    log.info("       │ Slots       : %d", len(missing_slots))
-    for i, slot in enumerate(missing_slots, 1):
-        log.info("       │   Slot %d: spatial=%s  temporal=%s  attrs=%s",
-                 i, slot.spatial, slot.temporal, slot.attributes)
-    log.info("       │ Posting to %s/kqml/receive ...", AGENT2_URL)
+    # Count total missing data points being asked
+    total_missing_pts = sum(
+        len(gap.temporal) * len(gap.attributes) for gap in gaps
+    )
+    log.info("       │ Sending KQML ask to Agent-2")
+    log.info("       │ Required slots : %d", total_missing_pts)
+    log.info("       │ Posting to %s ...", AGENT2_URL)
 
     response = httpx.post(
         f"{AGENT2_URL}/kqml/receive",
@@ -53,29 +53,29 @@ def send_kqml_ask(gaps: List[GapSlot]) -> Dict[str, Any]:
     )
     response.raise_for_status()
 
-    log.info("       │ Response status : HTTP %d", response.status_code)
-
     tell = JSONSerializer.from_dict(response.json())
-
-    log.info("       │ KQML tell received")
-    log.info("       │ in_reply_to  : %s", tell.in_reply_to)
-    log.info("       │ found_slots  : %d", len(tell.content.found_slots))
-    log.info("       │ missing_slots: %d", len(tell.content.missing_slots))
 
     found: List[Dict] = []
     still_missing: List[str] = []
 
     for slot in tell.content.found_slots:
-        log.info("       │ Found slot: spatial=%s  records=%d", slot.spatial, len(slot.data))
         for record in slot.data:
             flat = record.to_flat_dict()
-            log.info("       │   Record: %s", flat)
             found.append(flat)
 
     for slot in tell.content.missing_slots:
         s = slot.spatial
         states = [s] if isinstance(s, str) else list(s)
-        log.info("       │ Still missing: %s", states)
         still_missing.extend(states)
+
+    found_pts = sum(
+        len(v) for v in [
+            {k: v for k, v in r.items() if k not in ("spatial", "year")}
+            for r in found
+        ]
+    )
+    log.info("       │ Agent-2 filled : %d data points", found_pts)
+    if still_missing:
+        log.info("       │ Still missing  : %s", sorted(set(still_missing)))
 
     return {"found": found, "missing": still_missing}

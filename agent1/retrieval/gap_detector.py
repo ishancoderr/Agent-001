@@ -149,7 +149,8 @@ ORDER BY s.state_name, sd.stat_year;"""
             result_map[(state, yr)] = {attrs[i]: row[2 + i] for i in range(len(attrs))}
 
         found: List[DataRecord] = []
-        attr_gaps: Dict[str, List[int]] = {}
+        # attr_gaps is now keyed by (state, missing_attrs_tuple) → list of years
+        attr_gaps: Dict[tuple, List[int]] = {}
         temp_gaps: Dict[str, List[int]] = {}
 
         for state in local_states:
@@ -161,16 +162,22 @@ ORDER BY s.state_name, sd.stat_year;"""
                 else:
                     vals       = result_map[key]
                     null_attrs = [a for a in attrs if vals.get(a) is None]
-                    if not null_attrs:
-                        log.info("       │ FOUND        : %s year=%d → %s", state, yr, vals)
-                        found.append(DataRecord(state=state, year=yr, values=vals))
-                    else:
+                    present    = {k: v for k, v in vals.items() if v is not None}
+
+                    # Always save whatever IS available
+                    if present:
+                        log.info("       │ FOUND        : %s year=%d → %s", state, yr, present)
+                        found.append(DataRecord(state=state, year=yr, values=present))
+
+                    # Only gap the attributes that are actually missing
+                    if null_attrs:
                         log.info("       │ ATTR GAP     : %s year=%d (NULL: %s)", state, yr, null_attrs)
-                        attr_gaps.setdefault(state, []).append(yr)
+                        gap_key = (state, tuple(null_attrs))
+                        attr_gaps.setdefault(gap_key, []).append(yr)
 
         gaps: List[GapSlot] = []
-        for state, yrs in attr_gaps.items():
-            gaps.append(GapSlot(spatial=[state], temporal=yrs, attributes=attrs))
+        for (state, missing_attrs), yrs in attr_gaps.items():
+            gaps.append(GapSlot(spatial=[state], temporal=yrs, attributes=list(missing_attrs)))
         for state, yrs in temp_gaps.items():
             gaps.append(GapSlot(spatial=[state], temporal=yrs, attributes=attrs))
         if spatial_gap_states:

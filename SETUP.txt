@@ -1,0 +1,142 @@
+====================================================
+  AGENT 1 — SETUP AND RUN GUIDE  (Windows)
+====================================================
+
+
+STEP 1 — CREATE VIRTUAL ENVIRONMENT
+----------------------------------------------------
+Open PowerShell inside D:\Agent-001 and run:
+
+    python -m venv venv
+
+This creates a folder called venv\ inside D:\Agent-001.
+
+
+----------------------------------------------------
+STEP 2 — ACTIVATE VIRTUAL ENVIRONMENT
+----------------------------------------------------
+Run this every time you open a new terminal:
+
+    venv\Scripts\activate
+
+You will see (venv) appear at the start of the line:
+
+    (venv) PS D:\Agent-001>
+
+To deactivate (when done):
+
+    deactivate
+
+
+----------------------------------------------------
+STEP 3 — INSTALL DEPENDENCIES
+----------------------------------------------------
+Make sure venv is activated, then run:
+
+    pip install -r requirements.txt
+
+This installs everything including the kqml-messaging
+package directly from GitHub. Wait until it finishes.
+
+To verify installation:
+
+    pip list
+
+
+----------------------------------------------------
+STEP 4 — CONFIGURE .env FILE
+----------------------------------------------------
+Open agent1\.env and make sure these values are set:
+
+    DB_HOST=localhost
+    DB_PORT=5433
+    DB_USER=postgres
+    DB_PASS=your_postgres_password
+    DB_NAME=agent_1_db
+
+    AGENT2_URL=http://localhost:8001
+
+    OPENAI_API_KEY=sk-proj-...
+
+Save the file after editing.
+
+
+----------------------------------------------------
+STEP 5 — RUN AGENT 1
+----------------------------------------------------
+Make sure venv is activated, then run:
+
+    uvicorn agent1.main:app --port 8000 --reload
+
+You should see output like:
+
+    INFO:     Uvicorn running on http://127.0.0.1:8000
+    INFO:     Application startup complete.
+
+Agent 1 is now running on port 8000.
+
+
+----------------------------------------------------
+STEP 6 — TEST IT
+----------------------------------------------------
+Open a second PowerShell window and run:
+
+    curl -X POST http://localhost:8000/query `
+      -H "Content-Type: application/json" `
+      -d '{"query": "Give me population data from Hessen from 2022 to 2025"}'
+
+Or open your browser and go to:
+
+    http://localhost:8000/docs
+
+This opens the FastAPI interactive docs where you can
+test all endpoints without any extra tools.
+
+Health check:
+
+    curl http://localhost:8000/health
+
+
+----------------------------------------------------
+QUICK REFERENCE — DAILY USE
+----------------------------------------------------
+Every time you want to run Agent 1:
+
+    1.  Open PowerShell in D:\Agent-001
+    2.  venv\Scripts\activate
+    3.  uvicorn agent1.main:app --port 8000 --reload
+
+
+----------------------------------------------------
+TROUBLESHOOTING
+----------------------------------------------------
+
+Problem : 'python' is not recognized
+Fix     : Install Python 3.10+ from python.org
+          Make sure to check "Add Python to PATH"
+
+Problem : venv\Scripts\activate gives an error about
+          execution policy
+Fix     : Run this once in PowerShell as Administrator:
+              Set-ExecutionPolicy RemoteSigned
+          Then try activate again.
+
+Problem : pip install fails on kqml-messaging
+Fix     : Make sure Git is installed (git.scm.com)
+          The package is pulled from GitHub during install.
+
+Problem : Parse error: 'OPENAI_API_KEY'
+Fix     : The .env file is missing or the key has a
+          trailing space. Open agent1\.env and check
+          the OPENAI_API_KEY line has no space at the end.
+
+Problem : password authentication failed for postgres
+Fix     : Check DB_PASS in agent1\.env matches your
+          PostgreSQL password.
+
+Problem : connection refused on port 5433
+Fix     : Make sure PostgreSQL is running and listening
+          on port 5433 (not the default 5432).
+          Check DB_PORT=5433 in agent1\.env.
+
+====================================================

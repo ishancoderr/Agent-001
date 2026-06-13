@@ -32,7 +32,13 @@ class QueryResponse(BaseModel):
     data: List[Dict[str, Any]]
     still_missing: List[str]
     kqml_turns: int
-    total_records: int
+    total_records: int          # rows returned (one per state+year)
+    total_data_points: int      # total cells = records × attributes
+    present_data_points: int    # cells that have a real value
+    missing_data_points: int    # cells that are null / not found
+    complete_records: int       # rows where ALL attributes are present
+    partial_records: int        # rows where SOME attributes are null
+    empty_records: int          # rows where ALL attributes are null
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -113,24 +119,55 @@ def handle_query(body: UserQuery):
 
     # ── Step 5: Merge results ─────────────────────────────────────────────────
     log.info("STEP 5 │ Merging results ...")
-    merged = merge_results(local_result.found, agent2_data)
+    merged = merge_results(
+        local_result.found,
+        agent2_data,
+        requested_states=params.spatial,
+        requested_years=params.temporal,
+        requested_attrs=params.attributes,
+    )
     log.info("STEP 5 │ Done")
     log.info("       │ Agent-1 records : %d", len(local_result.found))
     log.info("       │ Agent-2 records : %d", len(agent2_data))
     log.info("       │ Total merged    : %d", len(merged))
 
+    # ── Data quality stats ────────────────────────────────────────────────────
+    attrs = params.attributes
+    complete = partial = empty = present_pts = 0
+    for row in merged:
+        present = [a for a in attrs if row.get(a) is not None]
+        if len(present) == len(attrs):
+            complete += 1
+        elif len(present) == 0:
+            empty += 1
+        else:
+            partial += 1
+        present_pts += len(present)
+
+    total_pts   = len(merged) * len(attrs)
+    missing_pts = total_pts - present_pts
+
+    log.info("       │ Data quality :")
+    log.info("       │   Total data points    : %d  (%d records × %d attrs)",
+             total_pts, len(merged), len(attrs))
+    log.info("       │   Present              : %d", present_pts)
+    log.info("       │   Missing (null)       : %d", missing_pts)
+    log.info("       │   Complete records     : %d  (all attrs present)", complete)
+    log.info("       │   Partial records      : %d  (some attrs present)", partial)
+    log.info("       │   Empty records        : %d  (all attrs null)", empty)
+
     # ── Final status ──────────────────────────────────────────────────────────
-    if not merged and not still_missing:
-        status = "not-found"
-    elif still_missing:
-        status = "partial-complete"
-    else:
+    if complete == len(merged):
         status = "complete"
+    elif present_pts == 0:
+        status = "not-found"
+    else:
+        status = "partial-complete"
 
     elapsed = (time.perf_counter() - t_start) * 1000
     log.info(SEPARATOR)
-    log.info("DONE   │ Status: %s  │  Records: %d  │  KQML turns: %d  │  %.0f ms",
-             status, len(merged), kqml_turns, elapsed)
+    log.info("DONE   │ Status: %s  │  Records: %d  │  Present: %d/%d  │  %.0f ms",
+             status, len(merged), present_pts, total_pts, elapsed)
     log.info(SEPARATOR)
 
     return QueryResponse(
@@ -145,6 +182,12 @@ def handle_query(body: UserQuery):
         still_missing=still_missing,
         kqml_turns=kqml_turns,
         total_records=len(merged),
+        total_data_points=total_pts,
+        present_data_points=present_pts,
+        missing_data_points=missing_pts,
+        complete_records=complete,
+        partial_records=partial,
+        empty_records=empty,
     )
 
 
