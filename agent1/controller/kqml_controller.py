@@ -17,7 +17,7 @@ from ..retrieval import execute_local_lookup_from_slots
 log = logging.getLogger("agent1.controller.kqml")
 router = APIRouter()
 
-SEPARATOR = "─" * 60
+SEPARATOR = "_" * 60
 
 
 class KQMLMessage(BaseModel):
@@ -33,7 +33,10 @@ class KQMLMessage(BaseModel):
 @router.post("/kqml/receive")
 def receive_kqml(msg: KQMLMessage):
     log.info(SEPARATOR)
-    log.info("KQML   │ Incoming ask from %s  req=%s", msg.sender, msg.reply_with)
+    log.info("                       START")
+    log.info("       Incoming KQML request received by Agent 1")
+    log.info(SEPARATOR)
+    log.info("KQML   │ From: %s  req=%s", msg.sender, msg.reply_with)
     log.info("       │ Missing slots: %d", len(msg.content.get("missing_slots", [])))
 
     found_slots   = []

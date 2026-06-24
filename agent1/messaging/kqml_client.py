@@ -74,8 +74,14 @@ def send_kqml_ask(gaps: List[GapSlot]) -> Dict[str, Any]:
             for r in found
         ]
     )
+
+    tokens_agent2 = 0
+    if hasattr(tell, "metadata") and tell.metadata is not None:
+        tokens_agent2 = getattr(tell.metadata, "token_usage", 0) or 0
+
     log.info("       │ Agent-2 filled : %d data points", found_pts)
+    log.info("       │ Agent-2 tokens : %d", tokens_agent2)
     if still_missing:
         log.info("       │ Still missing  : %s", sorted(set(still_missing)))
 
-    return {"found": found, "missing": still_missing}
+    return {"found": found, "missing": still_missing, "tokens_agent2": tokens_agent2}

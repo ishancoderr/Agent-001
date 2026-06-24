@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
+from datetime import datetime
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException
@@ -15,11 +17,12 @@ from ..pipeline import parse_query, validate_spatial
 from ..retrieval import execute_local_lookup
 from ..messaging import send_kqml_ask
 from ..result import merge_results
+from ..evaluation import log_evaluation_metrics
 
 log = logging.getLogger("agent1.controller.query")
 router = APIRouter()
 
-SEPARATOR = "─" * 60
+SEPARATOR = "_" * 60
 
 
 class UserQuery(BaseModel):
@@ -32,28 +35,40 @@ class QueryResponse(BaseModel):
     data: List[Dict[str, Any]]
     still_missing: List[str]
     kqml_turns: int
-    total_records: int          # rows returned (one per state+year)
-    total_data_points: int      # total cells = records × attributes
-    present_data_points: int    # cells that have a real value
-    missing_data_points: int    # cells that are null / not found
-    complete_records: int       # rows where ALL attributes are present
-    partial_records: int        # rows where SOME attributes are null
-    empty_records: int          # rows where ALL attributes are null
+    total_records: int
+    total_data_points: int
+    present_data_points: int
+    missing_data_points: int
+    complete_records: int
+    partial_records: int
+    empty_records: int
+    request_id: str
+    phase1_ms: float
+    phase2_ms: float
+    phase3_ms: float
+    total_ms: float
+    tokens_agent1: int
+    tokens_agent2: int
+    tokens_total: int
 
 
 @router.post("/query", response_model=QueryResponse)
 def handle_query(body: UserQuery):
-    t_start = time.perf_counter()
+    t0 = time.perf_counter()
+    request_id = uuid.uuid4().hex[:8]
+    timestamp  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     log.info(SEPARATOR)
-    log.info("STEP 0 │ New query received")
-    log.info("       │ Query : %r", body.query)
+    log.info("                       START")
+    log.info("         New user query received by Agent 1")
     log.info(SEPARATOR)
+    log.info("       │ Request ID : %s", request_id)
+    log.info("       │ Query      : %r", body.query)
 
     # ── Step 1: Parse NL query ─────────────────────────────────────────────────
     log.info("STEP 1 │ Parsing natural-language query with GPT-4o mini ...")
     try:
-        params = parse_query(body.query)
+        params, tokens_agent1 = parse_query(body.query)
     except Exception as exc:
         log.error("STEP 1 │ FAILED – %s", exc)
         raise HTTPException(status_code=400, detail=f"Parse error: {exc}") from exc
@@ -94,7 +109,10 @@ def handle_query(body: UserQuery):
         log.info("       │   Gap %d: spatial=%s  temporal=%s  attrs=%s",
                  i, gap.spatial, gap.temporal, gap.attributes)
 
-    kqml_turns = 0
+    t1 = time.perf_counter()  # end of phase 1
+
+    kqml_turns  = 0
+    tokens_agent2: int = 0
     agent2_data: List[Dict] = []
     still_missing: List[str] = []
 
@@ -103,10 +121,11 @@ def handle_query(body: UserQuery):
         log.info("STEP 4 │ Gaps detected – sending KQML ask to Agent-2 ...")
         log.info("       │ Missing slots to send: %d", len(local_result.gaps))
         try:
-            resp = send_kqml_ask(local_result.gaps)
+            resp          = send_kqml_ask(local_result.gaps)
             kqml_turns    = 1
             agent2_data   = resp.get("found", [])
             still_missing = resp.get("missing", [])
+            tokens_agent2 = resp.get("tokens_agent2", 0)
             log.info("STEP 4 │ KQML tell received from Agent-2")
             log.info("       │ Agent-2 found   : %d record(s)", len(agent2_data))
             log.info("       │ Still missing   : %s", still_missing if still_missing else "none")
@@ -116,6 +135,8 @@ def handle_query(body: UserQuery):
             still_missing = [s for gap in local_result.gaps for s in gap.spatial]
     else:
         log.info("STEP 4 │ Skipped (no gaps – Agent-2 not needed)")
+
+    t2 = time.perf_counter()  # end of phase 2
 
     # ── Step 5: Merge results ─────────────────────────────────────────────────
     log.info("STEP 5 │ Merging results ...")
@@ -130,6 +151,8 @@ def handle_query(body: UserQuery):
     log.info("       │ Agent-1 records : %d", len(local_result.found))
     log.info("       │ Agent-2 records : %d", len(agent2_data))
     log.info("       │ Total merged    : %d", len(merged))
+
+    t3 = time.perf_counter()  # end of phase 3
 
     # ── Data quality stats ────────────────────────────────────────────────────
     attrs = params.attributes
@@ -164,11 +187,37 @@ def handle_query(body: UserQuery):
     else:
         status = "partial-complete"
 
-    elapsed = (time.perf_counter() - t_start) * 1000
+    phase1_ms = (t1 - t0) * 1000
+    phase2_ms = (t2 - t1) * 1000
+    phase3_ms = (t3 - t2) * 1000
+    total_ms  = (t3 - t0) * 1000
+
     log.info(SEPARATOR)
     log.info("DONE   │ Status: %s  │  Records: %d  │  Present: %d/%d  │  %.0f ms",
-             status, len(merged), present_pts, total_pts, elapsed)
+             status, len(merged), present_pts, total_pts, total_ms)
     log.info(SEPARATOR)
+
+    # ── Evaluation metrics ────────────────────────────────────────────────────
+    log_evaluation_metrics({
+        "request_id":          request_id,
+        "timestamp":           timestamp,
+        "query":               body.query,
+        "phase1_ms":           phase1_ms,
+        "phase2_ms":           phase2_ms,
+        "phase3_ms":           phase3_ms,
+        "total_ms":            total_ms,
+        "tokens_agent1":       tokens_agent1,
+        "tokens_agent2":       tokens_agent2,
+        "tokens_total":        tokens_agent1 + tokens_agent2,
+        "total_records":       len(merged),
+        "total_data_points":   total_pts,
+        "present_data_points": present_pts,
+        "missing_data_points": missing_pts,
+        "complete_records":    complete,
+        "partial_records":     partial,
+        "empty_records":       empty,
+        "status":              status,
+    })
 
     return QueryResponse(
         status=status,
@@ -188,6 +237,14 @@ def handle_query(body: UserQuery):
         complete_records=complete,
         partial_records=partial,
         empty_records=empty,
+        request_id=request_id,
+        phase1_ms=phase1_ms,
+        phase2_ms=phase2_ms,
+        phase3_ms=phase3_ms,
+        total_ms=total_ms,
+        tokens_agent1=tokens_agent1,
+        tokens_agent2=tokens_agent2,
+        tokens_total=tokens_agent1 + tokens_agent2,
     )
 
 
