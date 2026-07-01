@@ -142,10 +142,15 @@ def _resolve_city_coords(city: str, db: Session):
             log.info("       │ City resolved (ilike) : %r → %r lat=%s lng=%s", city, row[2], row[0], row[1])
             return row[0], row[1]
 
-    # Partial match — city_name contains the search term
+    # Partial match — order by name length so shortest (most exact) match wins
     for name in candidates:
         row = db.execute(
-            text("SELECT lat, lng, city_name FROM cities WHERE city_name ILIKE :n LIMIT 1"),
+            text("""
+                SELECT lat, lng, city_name FROM cities
+                WHERE city_name ILIKE :n
+                ORDER BY LENGTH(city_name)
+                LIMIT 1
+            """),
             {"n": f"%{name}%"},
         ).fetchone()
         if row:

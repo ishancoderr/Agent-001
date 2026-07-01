@@ -49,7 +49,7 @@ def send_kqml_ask(gaps: List[GapSlot]) -> Dict[str, Any]:
     response = httpx.post(
         f"{AGENT2_URL}/kqml/receive",
         json=payload,
-        timeout=30.0,
+        timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0),
     )
     response.raise_for_status()
 

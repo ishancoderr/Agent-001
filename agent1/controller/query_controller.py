@@ -8,10 +8,11 @@ import logging
 import time
 import uuid
 from datetime import datetime
+import time as _time
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..pipeline import parse_query, validate_spatial
 from ..retrieval import execute_local_lookup
@@ -26,7 +27,7 @@ SEPARATOR = "_" * 60
 
 
 class UserQuery(BaseModel):
-    query: str
+    query: str = Field(..., min_length=5, max_length=500)
 
 
 class QueryInfo(BaseModel):
@@ -149,19 +150,25 @@ def handle_query(body: UserQuery):
     tokens_agent2 = 0
     agent2_data: List[Dict] = []
 
-    # ── Step 4: KQML ask to Agent 2 ───────────────────────────────────────────
+    # ── Step 4: KQML ask to Agent 2 (with retry) ─────────────────────────────
     if local_result.gaps:
         log.info("STEP 4 │ Gaps detected – sending KQML ask to Agent-2 ...")
         log.info("       │ Missing slots to send: %d", len(local_result.gaps))
-        try:
-            resp          = send_kqml_ask(local_result.gaps)
-            kqml_turns    = 1
-            agent2_data   = resp.get("found", [])
-            tokens_agent2 = resp.get("tokens_agent2", 0)
-            log.info("STEP 4 │ KQML tell received from Agent-2")
-            log.info("       │ Agent-2 found   : %d record(s)", len(agent2_data))
-        except Exception as exc:
-            log.warning("STEP 4 │ Agent-2 unreachable – %s", exc)
+        for attempt in range(1, 4):
+            try:
+                resp          = send_kqml_ask(local_result.gaps)
+                kqml_turns    = 1
+                agent2_data   = resp.get("found", [])
+                tokens_agent2 = resp.get("tokens_agent2", 0)
+                log.info("STEP 4 │ KQML tell received from Agent-2 (attempt %d)", attempt)
+                log.info("       │ Agent-2 found   : %d record(s)", len(agent2_data))
+                break
+            except Exception as exc:
+                log.warning("STEP 4 │ Agent-2 attempt %d failed – %s", attempt, exc)
+                if attempt < 3:
+                    _time.sleep(1.0 * attempt)
+                else:
+                    log.warning("STEP 4 │ Agent-2 unreachable after 3 attempts – gaps unresolved")
     else:
         log.info("STEP 4 │ Skipped (no gaps – Agent-2 not needed)")
 
@@ -201,11 +208,14 @@ def handle_query(body: UserQuery):
     missing_pts = total_pts - present_pts
     completeness = round(present_pts / total_pts * 100, 1) if total_pts else 0.0
 
-    # ── Provenance counts ─────────────────────────────────────────────────────
-    from_a1   = sum(1 for r in merged if r.get("source") == "Agent-1")
-    from_a2   = sum(1 for r in merged if r.get("source") == "Agent-2")
-    from_both = sum(1 for r in merged if "+" in r.get("source", ""))
-    unavail   = sum(1 for r in merged if r.get("source") == "missing")
+    # ── Provenance counts — single pass ──────────────────────────────────────
+    from_a1 = from_a2 = from_both = unavail = 0
+    for r in merged:
+        src = r.get("source", "")
+        if src == "Agent-1":    from_a1   += 1
+        elif src == "Agent-2":  from_a2   += 1
+        elif "+" in src:        from_both += 1
+        elif src == "missing":  unavail   += 1
 
     log.info("       │ Groups  : complete=%d  partial=%d  missing=%d",
              len(complete_rows), len(partial_rows), len(missing_rows))
