@@ -52,12 +52,16 @@ def _adjacency(rel: SpatialRelationship, db: Session) -> List[str]:
             text("""
                 SELECT s2.state_name
                 FROM states s1
-                JOIN states s2 ON ST_Touches(s1.geo_shape, s2.geo_shape)
-                WHERE s1.state_name = :ref AND s2.state_name != :ref
+                JOIN states s2
+                  ON ST_Intersects(s1.geo_shape, s2.geo_shape)
+                 AND NOT ST_Equals(s1.geo_shape, s2.geo_shape)
+                WHERE s1.state_name = :ref
+                  AND s2.state_name != :ref
             """),
             {"ref": ref},
         ).fetchall()
         sets.append({r[0] for r in rows})
+        log.info("       │ States touching %s: %s", ref, sorted({r[0] for r in rows}))
 
     if not sets:
         return []
@@ -90,25 +94,95 @@ def _direction(rel: SpatialRelationship, db: Session) -> List[str]:
     return [r[0] for r in rows]
 
 
-def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
-    city   = rel.refs[0] if rel.refs else "München"
-    dist_m = (rel.distance_km or 100) * 1000
+_CITY_ALIASES: dict = {
+    "Munich":      "München",
+    "Muenchen":    "München",
+    "Cologne":     "Köln",
+    "Koeln":       "Köln",
+    "Nuremberg":   "Nürnberg",
+    "Nuernberg":   "Nürnberg",
+    "Dusseldorf":  "Düsseldorf",
+    "Duesseldorf": "Düsseldorf",
+}
 
+
+def _resolve_city_coords(city: str, db: Session):
+    """
+    Find a city in the DB and return its (lat, lng) from the cities table.
+    Resolution order:
+      1. Exact match on city_name
+      2. Alias map → exact match
+      3. Case-insensitive ILIKE match
+      4. Partial ILIKE match (city name contains the search term)
+    Returns (lat, lng) tuple or None if not found.
+    """
+    candidates = list(dict.fromkeys(filter(None, [
+        city,
+        _CITY_ALIASES.get(city),
+        _CITY_ALIASES.get(city.title()),
+    ])))
+
+    # Exact and alias matches first
+    for name in candidates:
+        row = db.execute(
+            text("SELECT lat, lng FROM cities WHERE city_name = :n LIMIT 1"),
+            {"n": name},
+        ).fetchone()
+        if row:
+            log.info("       │ City resolved (exact) : %r → lat=%s lng=%s", city, row[0], row[1])
+            return row[0], row[1]
+
+    # Case-insensitive full match
+    for name in candidates:
+        row = db.execute(
+            text("SELECT lat, lng, city_name FROM cities WHERE city_name ILIKE :n LIMIT 1"),
+            {"n": name},
+        ).fetchone()
+        if row:
+            log.info("       │ City resolved (ilike) : %r → %r lat=%s lng=%s", city, row[2], row[0], row[1])
+            return row[0], row[1]
+
+    # Partial match — city_name contains the search term
+    for name in candidates:
+        row = db.execute(
+            text("SELECT lat, lng, city_name FROM cities WHERE city_name ILIKE :n LIMIT 1"),
+            {"n": f"%{name}%"},
+        ).fetchone()
+        if row:
+            log.info("       │ City resolved (partial): %r → %r lat=%s lng=%s", city, row[2], row[0], row[1])
+            return row[0], row[1]
+
+    log.warning("       │ City %r not found in cities table (tried: %s)", city, candidates)
+    return None
+
+
+def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
+    raw_city = rel.refs[0] if rel.refs else "München"
+    dist_m   = (rel.distance_km or 100) * 1000
+
+    coords = _resolve_city_coords(raw_city, db)
+    if coords is None:
+        log.warning("       │ Cannot resolve city %r — returning empty", raw_city)
+        return []
+
+    lat, lng = coords
     rows = db.execute(
         text("""
             SELECT s.state_name
             FROM states s
             WHERE ST_DWithin(
                 s.geo_shape::geography,
-                (SELECT centroid::geography FROM cities WHERE city_name = :city),
+                ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography,
                 :dist
             )
             ORDER BY ST_Distance(
                 s.geo_shape::geography,
-                (SELECT centroid::geography FROM cities WHERE city_name = :city)
+                ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography
             )
         """),
-        {"city": city, "dist": dist_m},
+        {"lat": lat, "lng": lng, "dist": dist_m},
     ).fetchall()
 
+    log.info("       │ States within %d km of %r : %s",
+             int(dist_m / 1000), raw_city, [r[0] for r in rows])
     return [r[0] for r in rows]

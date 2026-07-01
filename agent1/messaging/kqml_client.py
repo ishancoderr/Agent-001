@@ -68,6 +68,8 @@ def send_kqml_ask(gaps: List[GapSlot]) -> Dict[str, Any]:
         states = [s] if isinstance(s, str) else list(s)
         still_missing.extend(states)
 
+    still_missing = list(dict.fromkeys(still_missing))
+
     found_pts = sum(
         len(v) for v in [
             {k: v for k, v in r.items() if k not in ("spatial", "year")}

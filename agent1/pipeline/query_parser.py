@@ -40,6 +40,17 @@ Mecklenburg-Vorpommern, Niedersachsen, Nordrhein-Westfalen, Rheinland-Pfalz,
 Saarland, Sachsen, Sachsen-Anhalt, Schleswig-Holstein, Thüringen
 
 Valid attributes: population, marriages, live_births
+  - "married", "marriage", "marriages" → always output "marriages"
+  - "live birth", "births", "live_birth" → always output "live_births"
+
+City names – always use the German spelling with umlauts:
+  Munich / München   → "München"
+  Cologne / Köln     → "Köln"
+  Nuremberg / Nürnberg → "Nürnberg"
+  Dusseldorf         → "Düsseldorf"
+  Frankfurt          → "Frankfurt"
+  Stuttgart          → "Stuttgart"
+  Hamburg            → "Hamburg"
 
 Return JSON:
 {
@@ -61,14 +72,20 @@ Examples:
 "Give me marriages and live_births for Bayern from 2019 to 2023"
 → {"query_type":"DIRECT_LOOKUP","spatial":["Bayern"],"temporal":[2019,2020,2021,2022,2023],"attributes":["marriages","live_births"],"spatial_relationship":null}
 
+"Give me married and live birth data for Berlin in 2020"
+→ {"query_type":"DIRECT_LOOKUP","spatial":["Berlin"],"temporal":[2020],"attributes":["marriages","live_births"],"spatial_relationship":null}
+
 "Which state borders both Hessen and Hamburg? Show population 2015-2024"
 → {"query_type":"SPATIAL_ADJACENCY","spatial":"all","temporal":[2015,2016,2017,2018,2019,2020,2021,2022,2023,2024],"attributes":["population"],"spatial_relationship":{"type":"adjacency","refs":["Hessen","Hamburg"],"distance_km":null}}
 
-"States north of Bayern for 2020 and 2021, population and marriages"
+"States north of Bayern for 2020 and 2021, population and married"
 → {"query_type":"SPATIAL_DIRECTION","spatial":"all","temporal":[2020,2021],"attributes":["population","marriages"],"spatial_relationship":{"type":"north_of","refs":["Bayern"],"distance_km":null}}
 
-"Which states are within 100 km of München, population in 2021"
+"Which states are within 100 km of Munich, population in 2021"
 → {"query_type":"SPATIAL_DISTANCE","spatial":"all","temporal":[2021],"attributes":["population"],"spatial_relationship":{"type":"distance","refs":["München"],"distance_km":100}}
+
+"States within 150 km of Cologne, population and marriages 2020"
+→ {"query_type":"SPATIAL_DISTANCE","spatial":"all","temporal":[2020],"attributes":["population","marriages"],"spatial_relationship":{"type":"distance","refs":["Köln"],"distance_km":150}}
 """
 
 

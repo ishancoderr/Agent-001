@@ -29,27 +29,61 @@ class UserQuery(BaseModel):
     query: str
 
 
-class QueryResponse(BaseModel):
-    status: str
-    query_params: Dict[str, Any]
-    data: List[Dict[str, Any]]
-    still_missing: List[str]
-    kqml_turns: int
-    total_records: int
-    total_data_points: int
+class QueryInfo(BaseModel):
+    raw: str
+    type: str
+    spatial: List[str]
+    temporal: List[int]
+    attributes: List[str]
+
+
+class DataGroups(BaseModel):
+    complete: List[Dict[str, Any]]
+    partial:  List[Dict[str, Any]]
+    missing:  List[Dict[str, Any]]
+
+
+class Summary(BaseModel):
+    total_records:       int
+    complete_records:    int
+    partial_records:     int
+    missing_records:     int
+    total_data_points:   int
     present_data_points: int
     missing_data_points: int
-    complete_records: int
-    partial_records: int
-    empty_records: int
-    request_id: str
+    completeness_pct:    float
+
+
+class Provenance(BaseModel):
+    kqml_turns:             int
+    records_from_agent_1:   int
+    records_from_agent_2:   int
+    records_from_both:      int
+    records_unavailable:    int
+
+
+class Tokens(BaseModel):
+    agent_1: int
+    agent_2: int
+    total:   int
+
+
+class Performance(BaseModel):
     phase1_ms: float
     phase2_ms: float
     phase3_ms: float
-    total_ms: float
-    tokens_agent1: int
-    tokens_agent2: int
-    tokens_total: int
+    total_ms:  float
+    tokens:    Tokens
+
+
+class QueryResponse(BaseModel):
+    request_id:  str
+    status:      str
+    query:       QueryInfo
+    data:        DataGroups
+    summary:     Summary
+    provenance:  Provenance
+    performance: Performance
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -111,10 +145,9 @@ def handle_query(body: UserQuery):
 
     t1 = time.perf_counter()  # end of phase 1
 
-    kqml_turns  = 0
-    tokens_agent2: int = 0
+    kqml_turns    = 0
+    tokens_agent2 = 0
     agent2_data: List[Dict] = []
-    still_missing: List[str] = []
 
     # ── Step 4: KQML ask to Agent 2 ───────────────────────────────────────────
     if local_result.gaps:
@@ -124,15 +157,11 @@ def handle_query(body: UserQuery):
             resp          = send_kqml_ask(local_result.gaps)
             kqml_turns    = 1
             agent2_data   = resp.get("found", [])
-            still_missing = resp.get("missing", [])
             tokens_agent2 = resp.get("tokens_agent2", 0)
             log.info("STEP 4 │ KQML tell received from Agent-2")
             log.info("       │ Agent-2 found   : %d record(s)", len(agent2_data))
-            log.info("       │ Still missing   : %s", still_missing if still_missing else "none")
         except Exception as exc:
             log.warning("STEP 4 │ Agent-2 unreachable – %s", exc)
-            log.warning("       │ All gaps remain unresolved")
-            still_missing = [s for gap in local_result.gaps for s in gap.spatial]
     else:
         log.info("STEP 4 │ Skipped (no gaps – Agent-2 not needed)")
 
@@ -147,45 +176,51 @@ def handle_query(body: UserQuery):
         requested_years=params.temporal,
         requested_attrs=params.attributes,
     )
-    log.info("STEP 5 │ Done")
-    log.info("       │ Agent-1 records : %d", len(local_result.found))
-    log.info("       │ Agent-2 records : %d", len(agent2_data))
-    log.info("       │ Total merged    : %d", len(merged))
+    log.info("STEP 5 │ Done – %d total records", len(merged))
 
     t3 = time.perf_counter()  # end of phase 3
 
-    # ── Data quality stats ────────────────────────────────────────────────────
+    # ── Split into three groups ───────────────────────────────────────────────
     attrs = params.attributes
-    complete = partial = empty = present_pts = 0
+    complete_rows: List[Dict] = []
+    partial_rows:  List[Dict] = []
+    missing_rows:  List[Dict] = []
+    present_pts = 0
+
     for row in merged:
-        present = [a for a in attrs if row.get(a) is not None]
-        if len(present) == len(attrs):
-            complete += 1
-        elif len(present) == 0:
-            empty += 1
+        n = sum(1 for a in attrs if row.get(a) is not None)
+        present_pts += n
+        if n == len(attrs):
+            complete_rows.append(row)
+        elif n == 0:
+            missing_rows.append(row)
         else:
-            partial += 1
-        present_pts += len(present)
+            partial_rows.append(row)
 
     total_pts   = len(merged) * len(attrs)
     missing_pts = total_pts - present_pts
+    completeness = round(present_pts / total_pts * 100, 1) if total_pts else 0.0
 
-    log.info("       │ Data quality :")
-    log.info("       │   Total data points    : %d  (%d records × %d attrs)",
-             total_pts, len(merged), len(attrs))
-    log.info("       │   Present              : %d", present_pts)
-    log.info("       │   Missing (null)       : %d", missing_pts)
-    log.info("       │   Complete records     : %d  (all attrs present)", complete)
-    log.info("       │   Partial records      : %d  (some attrs present)", partial)
-    log.info("       │   Empty records        : %d  (all attrs null)", empty)
+    # ── Provenance counts ─────────────────────────────────────────────────────
+    from_a1   = sum(1 for r in merged if r.get("source") == "Agent-1")
+    from_a2   = sum(1 for r in merged if r.get("source") == "Agent-2")
+    from_both = sum(1 for r in merged if "+" in r.get("source", ""))
+    unavail   = sum(1 for r in merged if r.get("source") == "missing")
+
+    log.info("       │ Groups  : complete=%d  partial=%d  missing=%d",
+             len(complete_rows), len(partial_rows), len(missing_rows))
+    log.info("       │ Sources : A1=%d  A2=%d  both=%d  unavail=%d",
+             from_a1, from_a2, from_both, unavail)
+    log.info("       │ Data completeness: %.1f%%  (%d / %d points)",
+             completeness, present_pts, total_pts)
 
     # ── Final status ──────────────────────────────────────────────────────────
-    if complete == len(merged):
+    if len(complete_rows) == len(merged):
         status = "complete"
     elif present_pts == 0:
-        status = "not-found"
+        status = "not_found"
     else:
-        status = "partial-complete"
+        status = "partial"
 
     phase1_ms = (t1 - t0) * 1000
     phase2_ms = (t2 - t1) * 1000
@@ -193,8 +228,8 @@ def handle_query(body: UserQuery):
     total_ms  = (t3 - t0) * 1000
 
     log.info(SEPARATOR)
-    log.info("DONE   │ Status: %s  │  Records: %d  │  Present: %d/%d  │  %.0f ms",
-             status, len(merged), present_pts, total_pts, total_ms)
+    log.info("DONE   │ [%s] status=%s  complete=%d  partial=%d  missing=%d  %.0f ms",
+             request_id, status, len(complete_rows), len(partial_rows), len(missing_rows), total_ms)
     log.info(SEPARATOR)
 
     # ── Evaluation metrics ────────────────────────────────────────────────────
@@ -213,38 +248,55 @@ def handle_query(body: UserQuery):
         "total_data_points":   total_pts,
         "present_data_points": present_pts,
         "missing_data_points": missing_pts,
-        "complete_records":    complete,
-        "partial_records":     partial,
-        "empty_records":       empty,
+        "complete_records":    len(complete_rows),
+        "partial_records":     len(partial_rows),
+        "empty_records":       len(missing_rows),
         "status":              status,
     })
 
     return QueryResponse(
-        status=status,
-        query_params={
-            "type":       params.query_type,
-            "spatial":    params.spatial,
-            "temporal":   params.temporal,
-            "attributes": params.attributes,
-        },
-        data=merged,
-        still_missing=still_missing,
-        kqml_turns=kqml_turns,
-        total_records=len(merged),
-        total_data_points=total_pts,
-        present_data_points=present_pts,
-        missing_data_points=missing_pts,
-        complete_records=complete,
-        partial_records=partial,
-        empty_records=empty,
         request_id=request_id,
-        phase1_ms=phase1_ms,
-        phase2_ms=phase2_ms,
-        phase3_ms=phase3_ms,
-        total_ms=total_ms,
-        tokens_agent1=tokens_agent1,
-        tokens_agent2=tokens_agent2,
-        tokens_total=tokens_agent1 + tokens_agent2,
+        status=status,
+        query=QueryInfo(
+            raw=body.query,
+            type=params.query_type,
+            spatial=params.spatial,
+            temporal=params.temporal,
+            attributes=params.attributes,
+        ),
+        data=DataGroups(
+            complete=complete_rows,
+            partial=partial_rows,
+            missing=missing_rows,
+        ),
+        summary=Summary(
+            total_records=len(merged),
+            complete_records=len(complete_rows),
+            partial_records=len(partial_rows),
+            missing_records=len(missing_rows),
+            total_data_points=total_pts,
+            present_data_points=present_pts,
+            missing_data_points=missing_pts,
+            completeness_pct=completeness,
+        ),
+        provenance=Provenance(
+            kqml_turns=kqml_turns,
+            records_from_agent_1=from_a1,
+            records_from_agent_2=from_a2,
+            records_from_both=from_both,
+            records_unavailable=unavail,
+        ),
+        performance=Performance(
+            phase1_ms=round(phase1_ms, 1),
+            phase2_ms=round(phase2_ms, 1),
+            phase3_ms=round(phase3_ms, 1),
+            total_ms=round(total_ms, 1),
+            tokens=Tokens(
+                agent_1=tokens_agent1,
+                agent_2=tokens_agent2,
+                total=tokens_agent1 + tokens_agent2,
+            ),
+        ),
     )
 
 

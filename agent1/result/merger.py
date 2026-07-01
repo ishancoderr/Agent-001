@@ -40,11 +40,11 @@ def merge_results(
             merged[key] = entry
             log.info("       │ [Agent-2 new ] %s %s → %s", state, year, attrs)
 
-    # Ensure every requested (state, year) appears in the output — even when
-    # no data exists — so researchers see null entries instead of silent gaps.
     if requested_states and requested_years and requested_attrs:
         from ..retrieval.gap_detector import ALL_STATES
         states = ALL_STATES if "all" in requested_states else requested_states
+
+        # Fill completely absent (state, year) pairs with all-null placeholder
         for state in states:
             for year in requested_years:
                 key = (state, year)
@@ -58,6 +58,14 @@ def merge_results(
                         entry[attr] = None
                     merged[key] = entry
                     log.info("       │ [MISSING     ] %s %d → all null", state, year)
+
+        # Ensure every merged row has ALL requested attrs (null if absent)
+        for key, entry in merged.items():
+            for attr in requested_attrs:
+                if attr not in entry:
+                    entry[attr] = None
+                    log.info("       │ [FILL NULL   ] %s %s → %s=null",
+                             entry.get("state"), entry.get("year"), attr)
 
     result = sorted(merged.values(), key=lambda x: (x.get("state", ""), x.get("year", 0)))
     log.info("       │ Sorted merged list: %d records", len(result))

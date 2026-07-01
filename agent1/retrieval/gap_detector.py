@@ -230,17 +230,21 @@ WHERE s.state_name = ANY(ARRAY[{states_arr}])
         ).fetchall()
 
         found = []
-        found_keys: set = set()
+        fully_present_keys: set = set()
         for row in rows:
             state, yr = row[0], row[1]
-            vals = {attrs[i]: row[2 + i] for i in range(len(attrs))}
+            vals    = {attrs[i]: row[2 + i] for i in range(len(attrs))}
+            present = {k: v for k, v in vals.items() if v is not None}
+
+            if present:
+                found.append({"spatial": state, "year": yr, **present})
+
             if all(v is not None for v in vals.values()):
-                found.append({"spatial": state, "year": yr, **vals})
-                found_keys.add((state, yr))
+                fully_present_keys.add((state, yr))
 
         missing_states = [
             s for s in states
-            if any((s, yr) not in found_keys for yr in years)
+            if any((s, yr) not in fully_present_keys for yr in years)
         ]
         return {"found": found, "missing": list(dict.fromkeys(missing_states))}
 
