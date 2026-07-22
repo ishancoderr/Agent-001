@@ -6,6 +6,7 @@ Supported query types:
   SPATIAL_ADJACENCY  – "state that borders both Hessen and Hamburg"
   SPATIAL_DIRECTION  – "states north of Bayern"
   SPATIAL_DISTANCE   – "states within 100 km of München"
+  GEOMETRY_LOOKUP    – "geometry of Munich city" / "shape of Bayern state"
 """
 from __future__ import annotations
 
@@ -55,7 +56,11 @@ City names – always use the German spelling with umlauts:
   Stuttgart          → "Stuttgart"
   Hamburg            → "Hamburg"
 
-Return JSON:
+GEOMETRY QUERIES – if the user asks for the geometry, shape, boundary, centroid, WKT,
+or spatial extent of a city or state, output query_type = "GEOMETRY_LOOKUP" and populate
+entity_name and entity_type. Do NOT populate attributes or temporal for geometry queries.
+
+Return JSON (demographics queries):
 {
   "query_type": "DIRECT_LOOKUP" | "SPATIAL_ADJACENCY" | "SPATIAL_DIRECTION" | "SPATIAL_DISTANCE",
   "spatial": ["Bayern"] or "all",
@@ -67,6 +72,13 @@ Return JSON:
     "refs": ["Hessen", "Hamburg"],
     "distance_km": 100
   } or null
+}
+
+Return JSON (geometry queries):
+{
+  "query_type": "GEOMETRY_LOOKUP",
+  "entity_name": "München",
+  "entity_type": "city" | "state"
 }
 
 Examples:
@@ -90,6 +102,15 @@ Examples:
 
 "States within 150 km of Cologne, population and marriages 2020"
 → {"query_type":"SPATIAL_DISTANCE","spatial":"all","temporal_start":2020,"temporal_end":2020,"attributes":["population","marriages"],"spatial_relationship":{"type":"distance","refs":["Köln"],"distance_km":150}}
+
+"What is the geometry of Munich city?"
+→ {"query_type":"GEOMETRY_LOOKUP","entity_name":"München","entity_type":"city"}
+
+"Show me the boundary of Bayern state"
+→ {"query_type":"GEOMETRY_LOOKUP","entity_name":"Bayern","entity_type":"state"}
+
+"Give me the WKT shape of Köln"
+→ {"query_type":"GEOMETRY_LOOKUP","entity_name":"Köln","entity_type":"city"}
 """
 
 
@@ -108,6 +129,9 @@ class QueryParams:
     attributes: List[str]
     spatial_relationship: Optional[SpatialRelationship] = None
     raw_query: str = ""
+    # GEOMETRY_LOOKUP only
+    entity_name: Optional[str] = None
+    entity_type: Optional[str] = None  # "city" | "state"
 
 
 VALID_ATTRS  = {"population", "marriages", "live_births"}
@@ -140,6 +164,22 @@ def parse_query(query: str) -> tuple:
     log.info("       │ Tokens used : %d", tokens_consumed)
 
     data = json.loads(raw)
+
+    # ── Geometry lookup — short-circuit before demographics parsing ───────────
+    if data.get("query_type") == "GEOMETRY_LOOKUP":
+        entity_name = data.get("entity_name", "")
+        entity_type = data.get("entity_type", "city")
+        log.info("       │ GEOMETRY_LOOKUP : %s (%s)", entity_name, entity_type)
+        params = QueryParams(
+            query_type  = "GEOMETRY_LOOKUP",
+            spatial     = [],
+            temporal    = [],
+            attributes  = [],
+            raw_query   = query,
+            entity_name = entity_name,
+            entity_type = entity_type,
+        )
+        return params, tokens_consumed
 
     # Expand temporal range in Python instead of relying on GPT array expansion
     t_start = int(data.get("temporal_start", data.get("temporal_end", 2021)))

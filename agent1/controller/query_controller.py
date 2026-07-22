@@ -16,9 +16,12 @@ from pydantic import BaseModel, Field
 
 from ..pipeline import parse_query, validate_spatial
 from ..retrieval import execute_local_lookup
+from ..retrieval.geometry_resolver import resolve_geometries
 from ..messaging import send_kqml_ask
+from ..messaging.kqml_geometry_client import send_kqml_geometry_ask
 from ..result import merge_results
 from ..evaluation import log_evaluation_metrics
+from kqml_messaging import MessageFactory
 
 log = logging.getLogger("agent1.controller.query")
 router = APIRouter()
@@ -87,7 +90,7 @@ class QueryResponse(BaseModel):
     performance: Performance
 
 
-@router.post("/query", response_model=QueryResponse)
+@router.post("/query")
 def handle_query(body: UserQuery):
     t0 = time.perf_counter()
     request_id = uuid.uuid4().hex[:8]
@@ -110,6 +113,11 @@ def handle_query(body: UserQuery):
 
     log.info("STEP 1 │ Done")
     log.info("       │ Query type : %s", params.query_type)
+
+    # ── Geometry lookup — bypass demographics pipeline entirely ───────────────
+    if params.query_type == "GEOMETRY_LOOKUP":
+        return _handle_geometry(params, body.query, request_id, timestamp, t0, tokens_agent1)
+
     log.info("       │ Spatial    : %s", params.spatial)
     log.info("       │ Temporal   : %s", params.temporal)
     log.info("       │ Attributes : %s", params.attributes)
@@ -308,6 +316,90 @@ def handle_query(body: UserQuery):
             ),
         ),
     )
+
+
+def _handle_geometry(params, raw_query: str, request_id: str,
+                     timestamp: str, t0: float, tokens_agent1: int):
+    """Handle GEOMETRY_LOOKUP queries — resolve locally then ask Agent-2 if missing."""
+    entity_name = params.entity_name or ""
+    entity_type = params.entity_type or "city"
+
+    log.info("GEOM   │ Resolving geometry for %s (%s)", entity_name, entity_type)
+
+    slot = MessageFactory.missing_geometry_slot(
+        spatial_entity=entity_name,
+        entity_type=entity_type,
+    )
+
+    # Try local DB first
+    found_local, still_missing = resolve_geometries([slot])
+
+    t1 = time.perf_counter()
+
+    # Ask Agent-2 for anything not found locally
+    found_remote = []
+    kqml_turns   = 0
+    tokens_agent2 = 0
+    if still_missing:
+        log.info("GEOM   │ Not found locally — asking Agent-2 ...")
+        try:
+            resp          = send_kqml_geometry_ask(still_missing)
+            found_remote  = resp.get("found", [])
+            kqml_turns    = 1
+            log.info("GEOM   │ Agent-2 returned %d geometry result(s)", len(found_remote))
+        except Exception as exc:
+            log.warning("GEOM   │ Agent-2 unreachable — %s", exc)
+
+    t2 = time.perf_counter()
+
+    all_found = found_local + found_remote
+    phase1_ms = (t1 - t0) * 1000
+    phase2_ms = (t2 - t1) * 1000
+    total_ms  = (t2 - t0) * 1000
+
+    if all_found:
+        fg = all_found[0]
+        source = "Agent-1" if found_local else "Agent-2"
+        log.info("GEOM   │ Resolved from %s: wkt=%.80s…", source, fg.geometry)
+        result = {
+            "entity_name": fg.spatial_entity,
+            "entity_type": fg.entity_type,
+            "wkt":         fg.geometry,
+            "srid":        fg.srid,
+            "source":      source,
+        }
+        status = "found"
+    else:
+        log.warning("GEOM   │ Geometry not found in either agent for %s (%s)", entity_name, entity_type)
+        result = None
+        status = "not_found"
+
+    log.info(SEPARATOR)
+    log.info("DONE   │ [%s] geometry status=%s  %.0f ms", request_id, status, total_ms)
+    log.info(SEPARATOR)
+
+    return {
+        "request_id":  request_id,
+        "status":      status,
+        "query": {
+            "raw":         raw_query,
+            "type":        "GEOMETRY_LOOKUP",
+            "entity_name": entity_name,
+            "entity_type": entity_type,
+        },
+        "geometry": result,
+        "performance": {
+            "phase1_ms": round(phase1_ms, 1),
+            "phase2_ms": round(phase2_ms, 1),
+            "phase3_ms": 0.0,
+            "total_ms":  round(total_ms, 1),
+            "tokens": {
+                "agent_1": tokens_agent1,
+                "agent_2": tokens_agent2,
+                "total":   tokens_agent1 + tokens_agent2,
+            },
+        },
+    }
 
 
 @router.get("/health")
