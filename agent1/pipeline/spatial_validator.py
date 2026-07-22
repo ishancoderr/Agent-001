@@ -16,6 +16,51 @@ from .query_parser import QueryParams, SpatialRelationship
 
 log = logging.getLogger("agent1.pipeline.spatial")
 
+
+def _fill_missing_state_geometries(db: Session) -> List[str]:
+    """
+    Find states with NULL geo_shape in the local DB and request their
+    geometries from the peer agent via KQML. Updates the local DB in place.
+    Returns list of state names that were filled.
+    """
+    rows = db.execute(
+        text("SELECT state_name FROM states WHERE geo_shape IS NULL")
+    ).fetchall()
+    missing = [r[0] for r in rows]
+    if not missing:
+        return []
+
+    log.info("       │ States with NULL geo_shape: %s — requesting from peer", missing)
+
+    try:
+        from kqml_messaging import MessageFactory
+        from ..messaging.kqml_geometry_client import send_kqml_geometry_ask
+
+        slots = [
+            MessageFactory.missing_geometry_slot(spatial_entity=s, entity_type="state")
+            for s in missing
+        ]
+        resp  = send_kqml_geometry_ask(slots)
+        found = resp.get("found", [])
+
+        filled = []
+        for fg in found:
+            db.execute(
+                text("UPDATE states SET geo_shape = ST_GeomFromText(:wkt, 4326) WHERE state_name = :name"),
+                {"wkt": fg.geometry, "name": fg.spatial_entity},
+            )
+            log.info("       │ Filled geo_shape for %s from peer", fg.spatial_entity)
+            filled.append(fg.spatial_entity)
+
+        if filled:
+            db.commit()
+            log.info("       │ Committed %d missing geometry/geometries to local DB", len(filled))
+        return filled
+
+    except Exception as exc:
+        log.warning("       │ Could not fetch missing geometries from peer: %s", exc)
+        return []
+
 _DIRECTION_SQL = {
     "north_of": "(az <= 45 OR az >= 315)",
     "south_of": "(az BETWEEN 135 AND 225)",
@@ -31,6 +76,11 @@ def validate_spatial(params: QueryParams) -> QueryParams:
 
     db = SessionLocal()
     try:
+        # Fill any NULL geo_shapes from peer before running PostGIS queries
+        filled = _fill_missing_state_geometries(db)
+        if filled:
+            log.info("       │ Pre-filled geometries from peer: %s", filled)
+
         log.info("       │ Resolving %s via PostGIS ...", params.query_type)
         if params.query_type == "SPATIAL_ADJACENCY":
             params.spatial = _adjacency(params.spatial_relationship, db)
