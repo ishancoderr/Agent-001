@@ -321,18 +321,27 @@ def handle_query(body: UserQuery):
 def _handle_geometry(params, raw_query: str, request_id: str,
                      timestamp: str, t0: float, tokens_agent1: int):
     """Handle GEOMETRY_LOOKUP queries — resolve locally then ask Agent-2 if missing."""
-    entity_name = params.entity_name or ""
-    entity_type = params.entity_type or "city"
+    entities = params.entities or []
+    if not entities:
+        return {"request_id": request_id, "status": "error",
+                "message": "No entities found in geometry query.",
+                "performance": {"phase1_ms": round((time.perf_counter()-t0)*1000,1),
+                                "phase2_ms":0,"phase3_ms":0,"total_ms":0,
+                                "tokens":{"agent_1":tokens_agent1,"agent_2":0,"total":tokens_agent1}}}
+    log.info("GEOM   │ Resolving %d entity/entities: %s", len(entities), entities)
 
-    log.info("GEOM   │ Resolving geometry for %s (%s)", entity_name, entity_type)
-
-    slot = MessageFactory.missing_geometry_slot(
-        spatial_entity=entity_name,
-        entity_type=entity_type,
-    )
+    # Build slots for all requested entities
+    slots = [
+        MessageFactory.missing_geometry_slot(
+            spatial_entity=e["entity_name"],
+            entity_type=e["entity_type"],
+        )
+        for e in entities
+    ]
 
     # Try local DB first
-    found_local, still_missing = resolve_geometries([slot])
+    found_local, still_missing = resolve_geometries(slots)
+    local_names = {fg.spatial_entity for fg in found_local}
 
     t1 = time.perf_counter()
 
@@ -341,7 +350,7 @@ def _handle_geometry(params, raw_query: str, request_id: str,
     kqml_turns   = 0
     tokens_agent2 = 0
     if still_missing:
-        log.info("GEOM   │ Not found locally — asking Agent-2 ...")
+        log.info("GEOM   │ %d missing locally — asking Agent-2 ...", len(still_missing))
         try:
             resp          = send_kqml_geometry_ask(still_missing)
             found_remote  = resp.get("found", [])
@@ -352,42 +361,82 @@ def _handle_geometry(params, raw_query: str, request_id: str,
 
     t2 = time.perf_counter()
 
-    all_found = found_local + found_remote
     phase1_ms = (t1 - t0) * 1000
     phase2_ms = (t2 - t1) * 1000
     total_ms  = (t2 - t0) * 1000
 
-    if all_found:
-        fg = all_found[0]
-        source = "Agent-1" if found_local else "Agent-2"
-        log.info("GEOM   │ Resolved from %s: wkt=%.80s…", source, fg.geometry)
-        result = {
-            "entity_name": fg.spatial_entity,
-            "entity_type": fg.entity_type,
-            "wkt":         fg.geometry,
-            "srid":        fg.srid,
-            "source":      source,
-        }
-        status = "found"
-    else:
-        log.warning("GEOM   │ Geometry not found in either agent for %s (%s)", entity_name, entity_type)
-        result = None
+    # Index found geometries by spatial_entity name (case-insensitive)
+    local_index  = {fg.spatial_entity.lower(): fg for fg in found_local}
+    remote_index = {fg.spatial_entity.lower(): fg for fg in found_remote}
+
+    from ..pipeline.spatial_validator import _CITY_ALIASES
+
+    def _find_result(requested_name: str):
+        """Return (FoundGeometrySlot, source) or (None, 'not_found')."""
+        # Build all name variants to search
+        variants = list(dict.fromkeys(filter(None, [
+            requested_name,
+            _CITY_ALIASES.get(requested_name),
+            _CITY_ALIASES.get(requested_name.title()),
+        ])))
+        for v in variants:
+            key = v.lower()
+            if key in local_index:
+                return local_index[key], "Agent-1"
+            if key in remote_index:
+                return remote_index[key], "Agent-2"
+        return None, "not_found"
+
+    # Build result list preserving request order
+    geometries = []
+    for e in entities:
+        fg, source = _find_result(e["entity_name"])
+        if fg is not None:
+            geometries.append({
+                "entity_name": fg.spatial_entity,
+                "entity_type": fg.entity_type,
+                "wkt":         fg.geometry,
+                "srid":        fg.srid,
+                "source":      source,
+            })
+        else:
+            geometries.append({
+                "entity_name": e["entity_name"],
+                "entity_type": e["entity_type"],
+                "wkt":         None,
+                "srid":        4326,
+                "source":      "not_found",
+            })
+
+    found_count   = sum(1 for g in geometries if g["wkt"] is not None)
+    missing_count = len(geometries) - found_count
+
+    if found_count == len(geometries):
+        status = "complete"
+    elif found_count == 0:
         status = "not_found"
+    else:
+        status = "partial"
 
     log.info(SEPARATOR)
-    log.info("DONE   │ [%s] geometry status=%s  %.0f ms", request_id, status, total_ms)
+    log.info("DONE   │ [%s] geometry status=%s  found=%d  missing=%d  %.0f ms",
+             request_id, status, found_count, missing_count, total_ms)
     log.info(SEPARATOR)
 
     return {
-        "request_id":  request_id,
-        "status":      status,
+        "request_id": request_id,
+        "status":     status,
         "query": {
-            "raw":         raw_query,
-            "type":        "GEOMETRY_LOOKUP",
-            "entity_name": entity_name,
-            "entity_type": entity_type,
+            "raw":      raw_query,
+            "type":     "GEOMETRY_LOOKUP",
+            "entities": entities,
         },
-        "geometry": result,
+        "geometries": geometries,
+        "summary": {
+            "total":    len(geometries),
+            "found":    found_count,
+            "missing":  missing_count,
+        },
         "performance": {
             "phase1_ms": round(phase1_ms, 1),
             "phase2_ms": round(phase2_ms, 1),
