@@ -211,9 +211,12 @@ def _resolve_city_coords(city: str, db: Session):
     return None
 
 
+_DISTANCE_TOLERANCE_M = 1000  # absorbs polygon vertex rounding + centroid offset
+
 def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
-    raw_city = rel.refs[0] if rel.refs else "München"
-    dist_m   = (rel.distance_km or 100) * 1000
+    raw_city  = rel.refs[0] if rel.refs else "München"
+    dist_m    = (rel.distance_km or 100) * 1000
+    threshold = dist_m + _DISTANCE_TOLERANCE_M
 
     coords = _resolve_city_coords(raw_city, db)
     if coords is None:
@@ -235,9 +238,9 @@ def _distance(rel: SpatialRelationship, db: Session) -> List[str]:
                 ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography
             )
         """),
-        {"lat": lat, "lng": lng, "dist": dist_m},
+        {"lat": lat, "lng": lng, "dist": threshold},
     ).fetchall()
 
-    log.info("       │ States within %d km of %r : %s",
-             int(dist_m / 1000), raw_city, [r[0] for r in rows])
+    log.info("       │ States within %d km of %r (tol +%dm): %s",
+             int(dist_m / 1000), raw_city, _DISTANCE_TOLERANCE_M, [r[0] for r in rows])
     return [r[0] for r in rows]

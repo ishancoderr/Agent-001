@@ -52,8 +52,9 @@ def send_kqml_ask(gaps: List[GapSlot]) -> Dict[str, Any]:
         timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0),
     )
     response.raise_for_status()
+    tell_payload = response.json()
 
-    tell = JSONSerializer.from_dict(response.json())
+    tell = JSONSerializer.from_dict(tell_payload)
 
     found: List[Dict] = []
     still_missing: List[str] = []
@@ -86,4 +87,10 @@ def send_kqml_ask(gaps: List[GapSlot]) -> Dict[str, Any]:
     if still_missing:
         log.info("       │ Still missing  : %s", sorted(set(still_missing)))
 
-    return {"found": found, "missing": still_missing, "tokens_agent2": tokens_agent2}
+    return {
+        "found": found,
+        "missing": still_missing,
+        "tokens_agent2": tokens_agent2,
+        "ask_message": payload,
+        "tell_message": tell_payload,
+    }
