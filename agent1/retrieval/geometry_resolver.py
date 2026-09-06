@@ -39,7 +39,7 @@ def resolve_geometries(
     try:
         for slot in slots:
             entity_type = slot.entity_type.value  # plain str, not the EntityType repr, for logging
-            wkt, matched_name = _lookup(slot.spatial_entity, entity_type, db, queries=queries)
+            wkt, matched_name, _exists = _lookup(slot.spatial_entity, entity_type, db, queries=queries)
             if wkt is not None:
                 log.info("       │ Geometry FOUND : %s → %s (%s)",
                          slot.spatial_entity, matched_name, entity_type)
@@ -60,19 +60,27 @@ def resolve_geometries(
     return found, missing
 
 
-def _lookup(entity_name: str, entity_type: str, db, queries: Optional[List[str]] = None) -> str | None:
+def _lookup(entity_name: str, entity_type: str, db, queries: Optional[List[str]] = None):
     """
     Try to find the entity in the DB using multiple name forms:
     1. Exact match
     2. Alias (German↔English)
     3. Case-insensitive ILIKE
     4. Partial ILIKE (shortest match wins)
-    Returns WKT string or None. When `queries` is given, every attempted SQL
-    statement (values substituted, for readability) is appended to it.
+    Returns (wkt, matched_name, exists). `exists` is True whenever a row was
+    found under this entity_type - even one with a NULL geometry - which lets
+    a caller distinguish "this name has no row at all under this type" from
+    "this name exists here but its shape is missing". resolve_named_geometry
+    depends on that distinction: without it, a name that exists under both
+    tables (Berlin is both a city and a state) would fall through to the wrong
+    type the moment the correct one's shape is absent, silently returning a
+    city point in place of a missing state polygon. When `queries` is given,
+    every attempted SQL statement (values substituted, for readability) is
+    appended to it.
     """
     if entity_type not in ("city", "state"):
         log.warning("       │ Unknown entity_type %r for %r — skipping", entity_type, entity_name)
-        return None
+        return None, None, False
 
     # Build candidate name list — English alias first, then original German form
     candidates = list(dict.fromkeys(filter(None, [
@@ -100,7 +108,7 @@ def _lookup(entity_name: str, entity_type: str, db, queries: Optional[List[str]]
         ).fetchone()
         if row:
             log.info("       │ Resolved (exact)  : %r → %r", entity_name, row[1])
-            return row[0], row[1]
+            return row[0], row[1], True
 
     # 2 — entity exists but geometry is NULL → stop here, do NOT fall through to partial
     for name in candidates:
@@ -113,7 +121,7 @@ def _lookup(entity_name: str, entity_type: str, db, queries: Optional[List[str]]
         ).fetchone()
         if exists:
             log.info("       │ %s %r found in DB but geometry is NULL — will ask peer", entity_type, name)
-            return None, None
+            return None, None, True
 
     # 3 — entity not in DB at all: try case-insensitive full match with valid geometry
     for name in candidates:
@@ -131,10 +139,10 @@ def _lookup(entity_name: str, entity_type: str, db, queries: Optional[List[str]]
         ).fetchone()
         if row:
             log.info("       │ Resolved (ilike)  : %r → %r", entity_name, row[1])
-            return row[0], row[1]
+            return row[0], row[1], True
 
     log.info("       │ %s %r not found in DB (tried: %s)", entity_type, entity_name, candidates)
-    return None, None
+    return None, None, False
 
 
 # ── Buffer / within (Scenario 21: target that cannot be named) ──────────────
@@ -258,15 +266,37 @@ def resolve_named_geometry(
     name: str, entity_type: str, queries: Optional[List[str]] = None,
 ) -> Optional[Dict[str, object]]:
     """Look up a single named entity's geometry in the local catalogue.
-    Tries the given entity_type first, then the other one — a BufferWithin
-    reference is often a city while its targets are states (Scenario 20's own
-    setup: "which of NRW and Niedersachsen lie within 100 km of Dortmund"), so
-    a single declared entity_type for the whole operation isn't reliable per name.
-    Returns {"name": matched_name, "wkt": ..., "srid": 4326} or None if not held here."""
+
+    The declared entity_type is tried first and is authoritative if the name
+    exists under it at all — even with a NULL geometry. Only when the name has
+    no row whatsoever under that type is a different one considered, which is
+    what lets a BufferWithin reference resolve as a city when the operation's
+    blanket entity_type was "state" (Scenario 20's own setup: "which of NRW
+    and Niedersachsen lie within 100 km of Dortmund" — Dortmund is a city, the
+    targets are states, one entity_type does not fit every name).
+
+    That same fallback must not fire for a genuine gap: Berlin is both a city
+    and a state, so a Berlin state polygon that is missing here would silently
+    resolve as Berlin's city point instead — the wrong feature entirely,
+    returned as if it were the state's territory — if type-guessing did not
+    stop the moment it learns the name exists under the type actually asked
+    for. Returns {"name": matched_name, "wkt": ..., "srid": 4326}, or None if
+    genuinely not held here under any applicable type."""
     db = SessionLocal()
     try:
-        for et in dict.fromkeys([entity_type, "city", "state"]):
-            wkt, matched_name = _lookup(name, et, db, queries=queries)
+        wkt, matched_name, exists = _lookup(name, entity_type, db, queries=queries)
+        if wkt is not None:
+            return {"name": matched_name, "wkt": wkt, "srid": 4326}
+        if exists:
+            # Found under the type that was actually asked for; its geometry
+            # is genuinely absent here. Ask the peer for THIS type, not a
+            # different feature that happens to share the name.
+            return None
+
+        for et in ("city", "state"):
+            if et == entity_type:
+                continue
+            wkt, matched_name, _exists = _lookup(name, et, db, queries=queries)
             if wkt is not None:
                 return {"name": matched_name, "wkt": wkt, "srid": 4326}
         return None
