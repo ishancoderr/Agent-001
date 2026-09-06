@@ -12,24 +12,14 @@ from sqlalchemy import text
 from kqml_messaging import EntityType, MissingGeometrySlot, FoundGeometrySlot, MessageFactory, check_srid_agreement
 
 from ..database import SessionLocal
+from ..pipeline.gazetteer import normalize_entity_name
 
 log = logging.getLogger("agent1.retrieval.geometry_resolver")
 
-# German ↔ English city name aliases (same as spatial_validator)
-_CITY_ALIASES: dict = {
-    "München":    "Munich",
-    "Munich":     "München",
-    "Muenchen":   "München",
-    "Köln":       "Cologne",
-    "Cologne":    "Köln",
-    "Koeln":      "Köln",
-    "Nürnberg":   "Nuremberg",
-    "Nuremberg":  "Nürnberg",
-    "Nuernberg":  "Nürnberg",
-    "Düsseldorf": "Dusseldorf",
-    "Dusseldorf": "Düsseldorf",
-    "Duesseldorf":"Düsseldorf",
-}
+# City names are normalised through the gazetteer, which is built from the
+# name/alias JSON and verified against the database — see pipeline/gazetteer.py.
+# Private alias tables used to live here and in spatial_validator, pointing in
+# opposite directions; each produced names the database does not hold.
 
 
 def resolve_geometries(
@@ -86,9 +76,8 @@ def _lookup(entity_name: str, entity_type: str, db, queries: Optional[List[str]]
 
     # Build candidate name list — English alias first, then original German form
     candidates = list(dict.fromkeys(filter(None, [
-        _CITY_ALIASES.get(entity_name),
-        _CITY_ALIASES.get(entity_name.title()),
-        entity_name,
+        normalize_entity_name(entity_name, "city"),   # the spelling the database uses
+        entity_name,                       # then the name as given
     ])))
 
     table    = "cities" if entity_type == "city"  else "states"
@@ -162,9 +151,8 @@ def build_city_buffer(
     """Build a buffer polygon (metres) around a locally-held city's centroid.
     Returns {"ref_name", "wkt", "srid"} or None if the reference city isn't held here."""
     candidates = list(dict.fromkeys(filter(None, [
-        _CITY_ALIASES.get(ref_city),
-        _CITY_ALIASES.get(ref_city.title()),
-        ref_city,
+        normalize_entity_name(ref_city, "city"),   # the spelling the database uses
+        ref_city,                          # then the name as given
     ])))
     db = SessionLocal()
     try:

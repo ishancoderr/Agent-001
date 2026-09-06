@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..pipeline import parse_query, validate_spatial
+from ..pipeline.gazetteer import normalize_entity_name
 from ..retrieval import execute_local_lookup
 from ..retrieval.geometry_resolver import (
     resolve_geometries, build_city_buffer, buffer_from_point, cities_within_buffer,
@@ -207,12 +208,18 @@ def handle_query(body: UserQuery):
                 "type": params.query_type,
                 "relationship": {
                     "type":        rel.type if rel else None,
+                    "subject":     rel.subject if rel else None,
                     "refs":        rel.refs if rel else [],
                     "distance_km": rel.distance_km if rel else None,
                 },
             },
+            # A question that named a subject asked a yes/no. `verdict` carries
+            # it; `states` still carries the set the verdict was read from, so
+            # the answer can be checked. It is null when the question asked for
+            # the list rather than a verdict.
+            "verdict": params.verdict,
             "states": states,
-            "summary": {"total": len(states)},
+            "summary": {"total": len(states), "verdict": params.verdict},
             "performance": {
                 "phase1_ms": round(total_ms, 1),
                 "phase2_ms": 0.0,
@@ -533,15 +540,13 @@ def _handle_geometry(params, raw_query: str, request_id: str,
     local_index  = {fg.spatial_entity.lower(): fg for fg in found_local}
     remote_index = {fg.spatial_entity.lower(): fg for fg in found_remote}
 
-    from ..pipeline.spatial_validator import _CITY_ALIASES
-
     def _find_result(requested_name: str):
         """Return (FoundGeometrySlot, source) or (None, 'not_found')."""
-        # Build all name variants to search
+        # The gazetteer supplies the database's own spelling; the name as asked
+        # for is kept as a fallback in case the reply used that form.
         variants = list(dict.fromkeys(filter(None, [
+            normalize_entity_name(requested_name, "city"),
             requested_name,
-            _CITY_ALIASES.get(requested_name),
-            _CITY_ALIASES.get(requested_name.title()),
         ])))
         for v in variants:
             key = v.lower()
