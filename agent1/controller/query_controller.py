@@ -25,7 +25,7 @@ from ..messaging import send_kqml_ask
 from ..messaging.kqml_geometry_client import send_kqml_geometry_ask, send_kqml_city_buffer_ask
 from ..result import merge_results
 from ..evaluation import log_evaluation_metrics
-from kqml_messaging import MessageFactory
+from kqml_messaging import MessageFactory, response_status
 
 log = logging.getLogger("agent1.controller.query")
 router = APIRouter()
@@ -162,7 +162,7 @@ def handle_query(body: UserQuery):
     if params.query_type != "DIRECT_LOOKUP" and not params.attributes:
         t1 = time.perf_counter()
         states = [] if params.spatial == ["all"] else list(params.spatial)
-        status = "complete" if states else "not_found"
+        status = response_status(has_found=bool(states), has_missing=not states)
         total_ms = (t1 - t0) * 1000
 
         log.info(SEPARATOR)
@@ -219,11 +219,16 @@ def handle_query(body: UserQuery):
             },
             # A question that named a subject asked a yes/no. `verdict` carries
             # it; `states` still carries the set the verdict was read from, so
-            # the answer can be checked. It is null when the question asked for
-            # the list rather than a verdict.
+            # the answer can be checked. verdict is null both when the question
+            # asked for the list rather than a verdict, and when the subject or
+            # reference has no geometry anywhere - see `unknown_states` for the
+            # latter: a null verdict with the subject listed there means the
+            # relationship genuinely could not be tested, not "no".
             "verdict": params.verdict,
             "states": states,
-            "summary": {"total": len(states), "verdict": params.verdict},
+            "unknown_states": params.unknown_states,
+            "summary": {"total": len(states), "verdict": params.verdict,
+                       "unknown": len(params.unknown_states)},
             "performance": {
                 "phase1_ms": round(total_ms, 1),
                 "phase2_ms": 0.0,
@@ -331,12 +336,8 @@ def handle_query(body: UserQuery):
              completeness, present_pts, total_pts)
 
     # ── Final status ──────────────────────────────────────────────────────────
-    if len(complete_rows) == len(merged):
-        status = "complete"
-    elif present_pts == 0:
-        status = "not_found"
-    else:
-        status = "partial"
+    status = response_status(has_found=present_pts > 0,
+                             has_missing=len(complete_rows) != len(merged))
 
     phase1_ms = (t1 - t0) * 1000
     phase2_ms = (t2 - t1) * 1000
@@ -655,12 +656,7 @@ def _handle_geometry(params, raw_query: str, request_id: str,
     found_count   = sum(1 for g in geometries if g["wkt"] is not None)
     missing_count = len(geometries) - found_count
 
-    if found_count == len(geometries):
-        status = "complete"
-    elif found_count == 0:
-        status = "not_found"
-    else:
-        status = "partial"
+    status = response_status(has_found=found_count > 0, has_missing=missing_count > 0)
 
     log.info(SEPARATOR)
     log.info("DONE   │ [%s] geometry status=%s  found=%d  missing=%d  %.0f ms",
@@ -835,10 +831,10 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
             "total_records": len(names), "total_data_points": len(names),
             "present_data_points": len(names) - len(unresolved), "missing_data_points": len(unresolved),
             "complete_records": 0, "partial_records": 0, "empty_records": len(unresolved),
-            "status": "not_found",
+            "status": response_status(has_found=False, has_missing=True),
         })
         return {
-            "request_id": request_id, "status": "not_found",
+            "request_id": request_id, "status": response_status(has_found=False, has_missing=True),
             "query": {"raw": raw_query, "type": "SPATIAL_OPERATION", "operation": operation, "spatial": names},
             "still_missing": unresolved,
             "performance": {
@@ -938,12 +934,12 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
         "total_records": len(names), "total_data_points": len(names),
         "present_data_points": len(names), "missing_data_points": 0,
         "complete_records": len(names), "partial_records": 0, "empty_records": 0,
-        "status": "complete",
+        "status": response_status(has_found=True, has_missing=False),
     })
 
     return {
         "request_id": request_id,
-        "status":     "complete",
+        "status":     response_status(has_found=True, has_missing=False),
         "query": {
             "raw":       raw_query,
             "type":      "SPATIAL_OPERATION",
@@ -1020,10 +1016,10 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
                 "tokens_agent1": tokens_agent1, "tokens_agent2": 0, "tokens_total": tokens_agent1,
                 "total_records": 0, "total_data_points": 0, "present_data_points": 0,
                 "missing_data_points": 0, "complete_records": 0, "partial_records": 0,
-                "empty_records": 0, "status": "not_found",
+                "empty_records": 0, "status": response_status(has_found=False, has_missing=True),
             })
             return {
-                "request_id": request_id, "status": "not_found",
+                "request_id": request_id, "status": response_status(has_found=False, has_missing=True),
                 "query": {"raw": raw_query, "type": "SPATIAL_RELATIONSHIP_BUFFER",
                           "reference_city": ref_city, "distance_km": distance_km},
                 "cities": [],
@@ -1077,7 +1073,7 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
     phase3_ms = (t3 - t2) * 1000
     total_ms  = (t3 - t0) * 1000
 
-    status = "complete" if cities else "not_found"
+    status = response_status(has_found=bool(cities), has_missing=not cities)
 
     log.info(SEPARATOR)
     log.info("DONE   │ [%s] spatial-operation status=%s  found=%d  %.0f ms",
