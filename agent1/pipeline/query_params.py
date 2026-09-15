@@ -10,7 +10,10 @@ no stage has to import another stage just to know what a query looks like.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import yaml
 
 # The eight categories a query can be classified into. Seven are answerable
 # and map onto the document's scenarios; UNRELATED is the refusal.
@@ -23,9 +26,32 @@ VALID_QUERY_TYPES = {
 # shape (a spatial_relationship object).
 RELATIONSHIP_TYPES = {"SPATIAL_ADJACENCY", "SPATIAL_DIRECTION", "SPATIAL_DISTANCE"}
 
+# The four ways to combine two shapes, plus the named-target buffer test — see
+# config/prompts/spatial_operation.yaml's own comment for why there are
+# exactly five. Not sourced from config/schema: unlike VALID_ATTRS and
+# VALID_ENTITY_TYPES below, no config file declares this as structured data
+# (spatial_operation.yaml only mentions each name inside prose), so there is
+# nothing here to deduplicate against.
 VALID_OPERATIONS = {"Union", "Intersection", "Difference", "SymDifference", "BufferWithin"}
-VALID_ATTRS = {"population", "marriages", "live_births"}
-VALID_ENTITY_TYPES = {"city", "state"}
+
+_SCHEMA_DIR = Path(__file__).resolve().parent.parent.parent / "config" / "schema"
+
+# Every attribute column declared across every table in attributes.yaml — a
+# query's extracted attribute names are checked against this, not a
+# hardcoded {"population", "marriages", "live_births"} that would silently
+# fall out of sync the moment a table there gains or loses a column.
+_ATTRIBUTE_TABLES = yaml.safe_load(
+    (_SCHEMA_DIR / "attributes.yaml").read_text(encoding="utf-8")
+)["attribute_tables"]
+VALID_ATTRS = {column for table in _ATTRIBUTE_TABLES for column in table["columns"]}
+
+# Every enabled entity type declared in entities.yaml — same reasoning: this
+# used to be a hardcoded {"city", "state"} that entities.yaml's own "adding
+# an entity type needs no Python changes" promise didn't actually hold for.
+_ENTITIES = yaml.safe_load(
+    (_SCHEMA_DIR / "entities.yaml").read_text(encoding="utf-8")
+)["entities"]
+VALID_ENTITY_TYPES = {name for name, spec in _ENTITIES.items() if spec.get("enabled", True)}
 
 
 @dataclass
@@ -84,3 +110,9 @@ class QueryParams:
     classify_tokens: int = 0
     extract_tokens: int = 0
     extracted_data: Dict[str, Any] = field(default_factory=dict)
+    # The actual model each stage used for this request — QueryClassifier.model
+    # / QueryExtractor.model, which is CLASSIFY_MODEL/EXTRACT_MODEL (the env
+    # default) unless this request passed its own `model` override. Carried
+    # through so evaluation logging reports what really ran, not a guess.
+    classify_model: str = ""
+    extract_model: str = ""

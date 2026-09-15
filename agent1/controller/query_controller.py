@@ -9,12 +9,12 @@ import time
 import uuid
 from datetime import datetime
 import time as _time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ..pipeline import parse_query, validate_spatial
+from ..pipeline import run as run_pipeline
 from ..pipeline.gazetteer import normalize_entity_name
 from ..retrieval import execute_local_lookup
 from ..retrieval.geometry_resolver import (
@@ -35,6 +35,11 @@ SEPARATOR = "_" * 60
 
 class UserQuery(BaseModel):
     query: str = Field(..., min_length=5, max_length=500)
+    # Per-request override of the OpenAI model used for classification and
+    # extraction. Omit to use CLASSIFY_MODEL/EXTRACT_MODEL from the server's
+    # .env (see agent1/.env.example) — this is for a caller who wants a
+    # specific model for one query, not for setting the deployment default.
+    model: Optional[str] = Field(None, min_length=1, max_length=100)
 
 
 class QueryInfo(BaseModel):
@@ -107,13 +112,15 @@ def handle_query(body: UserQuery):
     log.info("       │ Request ID : %s", request_id)
     log.info("       │ Query      : %r", body.query)
 
-    # ── Step 1: Parse NL query ─────────────────────────────────────────────────
+    # ── Steps 1-2: run the pipeline (parse, classify, extract, and — for
+    # DIRECT_LOOKUP/relationship queries — resolve spatially via PostGIS) ───────
     log.info("STEP 1 │ Parsing natural-language query with GPT-4o mini ...")
     try:
-        params, tokens_agent1 = parse_query(body.query)
+        params = run_pipeline(body.query, model=body.model)
     except Exception as exc:
         log.error("STEP 1 │ FAILED – %s", exc)
         raise HTTPException(status_code=400, detail=f"Parse error: {exc}") from exc
+    tokens_agent1 = params.classify_tokens + params.extract_tokens
 
     log.info("STEP 1 │ Done")
     log.info("       │ Query type : %s", params.query_type)
@@ -146,15 +153,11 @@ def handle_query(body: UserQuery):
         log.info("       │ Relationship: type=%s  refs=%s  dist_km=%s",
                  rel.type, rel.refs, rel.distance_km)
 
-    # ── Step 2: Resolve spatial relationships ──────────────────────────────────
+    # ── Step 2: Spatial relationship resolution already ran inside
+    # run_pipeline() (PostGIS, for DIRECT_LOOKUP/relationship queries only) ────
     if params.query_type != "DIRECT_LOOKUP":
-        log.info("STEP 2 │ Resolving spatial relationship via PostGIS (%s) ...",
-                 params.query_type)
-        before = list(params.spatial)
-        params = validate_spatial(params)
-        log.info("STEP 2 │ Done")
-        log.info("       │ Before  : %s", before)
-        log.info("       │ Resolved: %s (%d states)", params.spatial, len(params.spatial))
+        log.info("STEP 2 │ Resolved via PostGIS (%s): %s (%d states)",
+                 params.query_type, params.spatial, len(params.spatial))
     else:
         log.info("STEP 2 │ Skipped (DIRECT_LOOKUP – no spatial resolution needed)")
 
@@ -177,6 +180,8 @@ def handle_query(body: UserQuery):
             "query_type":        params.query_type,
             "classify_tokens":   params.classify_tokens,
             "extract_tokens":    params.extract_tokens,
+            "classify_model":     params.classify_model,
+            "extract_model":      params.extract_model,
             "extracted_data":    params.extracted_data,
             "local_resolution": {
                 "resolution_method": f"PostGIS spatial relationship ({params.query_type})",
@@ -357,6 +362,8 @@ def handle_query(body: UserQuery):
         "query_type":          params.query_type,
         "classify_tokens":     params.classify_tokens,
         "extract_tokens":      params.extract_tokens,
+        "classify_model":     params.classify_model,
+        "extract_model":      params.extract_model,
         "extracted_data":      params.extracted_data,
         "local_resolution": {
             "states_queried":     params.spatial,
@@ -452,6 +459,8 @@ def _handle_unrelated(params, raw_query: str, request_id: str, timestamp: str, t
         "query_type":        "UNRELATED",
         "classify_tokens":   params.classify_tokens,
         "extract_tokens":    0,
+        "classify_model":     params.classify_model,
+        "extract_model":      params.extract_model,
         "extracted_data":    {},
         "local_resolution": {
             "note": "rejected before any local database lookup was attempted",
@@ -514,6 +523,8 @@ def _handle_needs_year(params, raw_query: str, request_id: str, timestamp: str, 
         "query_type":        "NEEDS_YEAR",
         "classify_tokens":   params.classify_tokens,
         "extract_tokens":    params.extract_tokens,
+        "classify_model":     params.classify_model,
+        "extract_model":      params.extract_model,
         "extracted_data":    params.extracted_data,
         "local_resolution": {
             "note": "rejected before any local database lookup was attempted "
@@ -670,6 +681,8 @@ def _handle_geometry(params, raw_query: str, request_id: str,
         "query_type":        "GEOMETRY_LOOKUP",
         "classify_tokens":   params.classify_tokens,
         "extract_tokens":    params.extract_tokens,
+        "classify_model":     params.classify_model,
+        "extract_model":      params.extract_model,
         "extracted_data":    params.extracted_data,
         "local_resolution": {
             "entities_requested": [e["entity_name"] for e in entities],
@@ -821,7 +834,7 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
         log_evaluation_metrics({
             "request_id": request_id, "timestamp": timestamp, "query": raw_query,
             "query_type": "SPATIAL_OPERATION",
-            "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens,
+            "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens, "classify_model": params.classify_model, "extract_model": params.extract_model,
             "extracted_data": params.extracted_data, "local_resolution": local_resolution,
             "kqml_exchanges": kqml_exchanges,
             "phase1_ms": (t1 - t0) * 1000, "phase2_ms": (t2 - t1) * 1000, "phase3_ms": 0.0,
@@ -892,7 +905,7 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
         log_evaluation_metrics({
             "request_id": request_id, "timestamp": timestamp, "query": raw_query,
             "query_type": "SPATIAL_OPERATION",
-            "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens,
+            "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens, "classify_model": params.classify_model, "extract_model": params.extract_model,
             "extracted_data": params.extracted_data, "local_resolution": local_resolution,
             "kqml_exchanges": kqml_exchanges,
             "phase1_ms": (t1-t0)*1000, "phase2_ms": (t2-t1)*1000, "phase3_ms": 0.0,
@@ -924,7 +937,7 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
     log_evaluation_metrics({
         "request_id": request_id, "timestamp": timestamp, "query": raw_query,
         "query_type": "SPATIAL_OPERATION",
-        "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens,
+        "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens, "classify_model": params.classify_model, "extract_model": params.extract_model,
         "extracted_data": params.extracted_data,
         "local_resolution": {**local_resolution, "sources": sources},
         "kqml_exchanges": kqml_exchanges,
@@ -1004,7 +1017,7 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
             log_evaluation_metrics({
                 "request_id": request_id, "timestamp": timestamp, "query": raw_query,
                 "query_type": "SPATIAL_RELATIONSHIP_BUFFER",
-                "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens,
+                "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens, "classify_model": params.classify_model, "extract_model": params.extract_model,
                 "extracted_data": params.extracted_data,
                 "local_resolution": {
                     "reference_city": ref_city, "distance_km": distance_km,
@@ -1083,7 +1096,7 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
     log_evaluation_metrics({
         "request_id": request_id, "timestamp": timestamp, "query": raw_query,
         "query_type": "SPATIAL_RELATIONSHIP_BUFFER",
-        "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens,
+        "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens, "classify_model": params.classify_model, "extract_model": params.extract_model,
         "extracted_data": params.extracted_data,
         "local_resolution": {
             "reference_city":     ref_name,

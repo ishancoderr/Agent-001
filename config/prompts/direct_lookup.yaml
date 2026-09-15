@@ -1,0 +1,59 @@
+# Stage-2 extraction prompt: DIRECT_LOOKUP.
+#
+# This carries only what is genuinely specific to this prompt — the intro,
+# the temporal-array rule, the output shape, and worked examples. It does
+# NOT repeat the valid attribute list or their aliases ("married" ->
+# "marriages", etc.) — those already live once in config/schema/attributes.yaml
+# and get generated into the assembled prompt at build time, the same way
+# STATE_NAMES_BLOCK is generated from the gazetteer instead of being
+# hardcoded in each template.
+#
+# `sections` is the render order — see agent1/pipeline/prompt_loader.py for
+# how each name there is turned into prompt text and assembled with the
+# other prompt files' sections into the final system prompt sent to the model.
+
+version: 1
+
+query_type: DIRECT_LOOKUP
+
+sections: [intro, gazetteer, attributes, temporal_rules, output_schema, output_notes, examples]
+
+gazetteer: [state]
+attributes_entity: state
+
+intro: 'You are extracting the details of a DIRECT_LOOKUP query for a geospatial
+  statistics database about German federal states. Return ONLY valid JSON
+  (no markdown fences).'
+
+temporal_rules: '"temporal" is always a JSON array of every individual year being asked
+  about, listed out in full — NOT a start/end pair. A range like "2019 to
+  2023" must be expanded into every year in that range:
+  [2019,2020,2021,2022,2023]. A single year is still a one-element array:
+  [2021]. If the query says "now", "current", "currently", "this year",
+  "today", or similar, use CURRENT_YEAR (given below) — that is an actual
+  year being asked about, not an assumption you are making. If the query
+  names no year at all and implies none, leave this field an empty array:
+  []. Never fill in a year the query did not ask about and did not imply —
+  an empty array is the correct, honest answer when nothing indicates one.'
+
+output_schema: |-
+  {
+    "spatial": ["Bayern"] or "all",
+    "temporal": [2021],
+    "attributes": ["population"]
+  }
+
+output_notes: '"spatial" is the named state(s), or "all" if none/every state is named.
+  "attributes" lists every attribute the query asks for; if none is named,
+  still include "population" since a data lookup needs at least one
+  attribute to answer.'
+
+examples:
+  - query: "Give me population for all German states in 2021"
+    output: {spatial: "all", temporal: [2021], attributes: ["population"]}
+
+  - query: "Give me marriages and live_births for Bayern from 2019 to 2023"
+    output: {spatial: ["Bayern"], temporal: [2019, 2020, 2021, 2022, 2023], attributes: ["marriages", "live_births"]}
+
+  - query: "Give me married and live birth data for Berlin in 2020"
+    output: {spatial: ["Berlin"], temporal: [2020], attributes: ["marriages", "live_births"]}

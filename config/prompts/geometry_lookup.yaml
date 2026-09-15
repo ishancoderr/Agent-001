@@ -1,0 +1,77 @@
+# Stage-2 extraction prompt: GEOMETRY_LOOKUP.
+#
+# Prompt-specific content only — see config/prompts/direct_lookup.yaml for
+# the convention this follows (attribute data deferred to
+# config/schema/attributes.yaml; state/city name blocks generated from the
+# gazetteer). This template carries no attributes at all, since a geometry
+# lookup returns shapes, not measured values.
+#
+# entity_type_rules is a genuine YAML list rather than one folded paragraph,
+# since each bullet is an independent rule — a list loses nothing by being
+# read out one item at a time, unlike subject_rules in spatial_relationship.yaml.
+#
+# `sections` is the render order — see agent1/pipeline/prompt_loader.py for
+# how each name there is turned into prompt text and assembled with the
+# other prompt files' sections into the final system prompt sent to the model.
+
+version: 1
+
+query_type: GEOMETRY_LOOKUP
+
+sections: [intro, gazetteer, entity_type_rules, output_schema, output_notes, examples]
+
+gazetteer: [state, city]
+entity_type_rules_intro: "ENTITY TYPE RULES:"
+
+intro: 'You are extracting the details of a GEOMETRY_LOOKUP query for a geospatial statistics
+  database about German federal states. Return ONLY valid JSON (no markdown fences).'
+
+entity_type_rules:
+  - 'If the name is one of the 16 German federal states → entity_type = "state"'
+  - 'If the name is a city → entity_type = "city"'
+  - '"Berlin" is BOTH a city and a state. Default to entity_type = "state" unless the user
+    explicitly says "city of Berlin".'
+  - '"Hamburg" and "Bremen" are also both cities and states — same rule, default to "state".'
+
+output_schema: |-
+  {
+    "entities": [
+      {"entity_name": "München", "entity_type": "city"},
+      {"entity_name": "Bayern",  "entity_type": "state"}
+    ]
+  }
+
+output_notes: 'List every entity the query asks about. Do not include attributes or temporal fields.'
+
+examples:
+  - query: "What is the geometry of Munich city?"
+    output: {entities: [{entity_name: "München", entity_type: "city"}]}
+
+  - query: "Show me the boundary of Bayern state"
+    output: {entities: [{entity_name: "Bayern", entity_type: "state"}]}
+
+  - query: "What are the geometries of München and Bayern?"
+    output: {entities: [{entity_name: "München", entity_type: "city"}, {entity_name: "Bayern", entity_type: "state"}]}
+
+  - query: "Give me geometries for Berlin, Hamburg, Köln and Frankfurt"
+    output: {entities: [{entity_name: "Berlin", entity_type: "state"}, {entity_name: "Hamburg", entity_type: "state"}, {entity_name: "Köln", entity_type: "city"}, {entity_name: "Frankfurt", entity_type: "city"}]}
+
+  - query: "Show shapes of all German states"
+    output:
+      entities:
+        - {entity_name: "Baden-Württemberg", entity_type: "state"}
+        - {entity_name: "Bayern", entity_type: "state"}
+        - {entity_name: "Berlin", entity_type: "state"}
+        - {entity_name: "Brandenburg", entity_type: "state"}
+        - {entity_name: "Bremen", entity_type: "state"}
+        - {entity_name: "Hamburg", entity_type: "state"}
+        - {entity_name: "Hessen", entity_type: "state"}
+        - {entity_name: "Mecklenburg-Vorpommern", entity_type: "state"}
+        - {entity_name: "Niedersachsen", entity_type: "state"}
+        - {entity_name: "Nordrhein-Westfalen", entity_type: "state"}
+        - {entity_name: "Rheinland-Pfalz", entity_type: "state"}
+        - {entity_name: "Saarland", entity_type: "state"}
+        - {entity_name: "Sachsen", entity_type: "state"}
+        - {entity_name: "Sachsen-Anhalt", entity_type: "state"}
+        - {entity_name: "Schleswig-Holstein", entity_type: "state"}
+        - {entity_name: "Thüringen", entity_type: "state"}

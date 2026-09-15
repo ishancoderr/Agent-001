@@ -6,11 +6,20 @@ Every request — whatever category it lands in (DIRECT_LOOKUP, a spatial
 relationship, GEOMETRY_LOOKUP, SPATIAL_OPERATION, SPATIAL_RELATIONSHIP_BUFFER,
 or UNRELATED) — logs the same five sections, so any request can be replayed
 step by step from this file alone:
-  1. CLASSIFICATION : which category stage 1 (GPT-4) chose, and its token cost
-  2. EXTRACTION      : the raw fields stage 2 (gpt-4o-mini) pulled out
+  1. CLASSIFICATION : which category stage 1 chose, which model ran it, and
+                       its token cost
+  2. EXTRACTION      : the raw fields stage 2 pulled out, which model ran it
   3. LOCAL RESOLUTION: what this agent found in its own database, unassisted
   4. KQML EXCHANGE    : every ask/tell round-trip with the peer, verbatim
   5. RESULT / TIMING / TOKENS : the final outcome and cost
+
+The model name shown for each stage is whatever QueryClassifier.model /
+QueryExtractor.model actually was for that request (see
+metrics["classify_model"]/["extract_model"], set from QueryParams by
+query_controller.py) — CLASSIFY_MODEL/EXTRACT_MODEL's env-configured default
+unless that request passed its own `model` override. Never hardcode a model
+name here: it drifts the moment the env default or a request's override
+changes, silently mislabeling every report after that.
 """
 from __future__ import annotations
 
@@ -37,7 +46,7 @@ _SEP  = "-" * 60
 def _fmt_classification(m: Dict[str, Any]) -> str:
     return (
         f"{_SEP}\n"
-        f"STEP 1 — CLASSIFICATION (GPT-4, stage 1)\n"
+        f"STEP 1 — CLASSIFICATION ({m.get('classify_model', 'unknown model')}, stage 1)\n"
         f"  Category chosen      : {m.get('query_type', 'n/a')}\n"
         f"  Tokens used          : {m.get('classify_tokens', 0)}\n"
     )
@@ -47,7 +56,8 @@ def _fmt_extraction(m: Dict[str, Any]) -> str:
     extracted = m.get("extracted_data")
     parts = [
         f"{_SEP}\n"
-        f"STEP 2 — EXTRACTION (gpt-4o-mini, template = {m.get('query_type', 'n/a')})\n"
+        f"STEP 2 — EXTRACTION ({m.get('extract_model') or 'not run'}, "
+        f"template = {m.get('query_type', 'n/a')})\n"
         f"  Tokens used          : {m.get('extract_tokens', 0)}\n"
     ]
     if m.get("query_type") == "UNRELATED":

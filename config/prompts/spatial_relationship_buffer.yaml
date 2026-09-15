@@ -1,0 +1,43 @@
+# Stage-2 extraction prompt: SPATIAL_RELATIONSHIP_BUFFER.
+#
+# Prompt-specific content only — see config/prompts/direct_lookup.yaml for
+# the convention this follows. This category has no attributes/temporal
+# fields at all, so there's nothing here to defer to attributes.yaml.
+#
+# `sections` is the render order — see agent1/pipeline/prompt_loader.py for
+# how each name there is turned into prompt text and assembled with the
+# other prompt files' sections into the final system prompt sent to the model.
+
+version: 1
+
+query_type: SPATIAL_RELATIONSHIP_BUFFER
+
+sections: [intro, gazetteer, output_schema, output_notes, examples]
+
+gazetteer: [city]
+
+intro: 'You are extracting the details of a SPATIAL_RELATIONSHIP_BUFFER query for a geospatial
+  statistics system about German cities. This category is a buffer-and-test query over an
+  OPEN-ENDED target type: it asks which CITIES lie within some distance of a named
+  reference city, where the target cities cannot be named in advance since they are the
+  answer. Return ONLY valid JSON (no markdown fences).'
+
+output_schema: |-
+  {
+    "spatial": ["Dortmund"],
+    "operations": ["Buffer", "Within"],
+    "distance_km": 100,
+    "target_entity": "city"
+  }
+
+output_notes: '"spatial" holds the single reference city the distance is measured from. "operations" is
+  always ["Buffer", "Within"] for this category. "distance_km" is the distance in
+  kilometres named in the query (default 100 if unspecified). "target_entity" is always
+  "city". Do not include attributes or temporal fields.'
+
+examples:
+  - query: "Which cities lie within 100 km of Dortmund?"
+    output: {spatial: ["Dortmund"], operations: ["Buffer", "Within"], distance_km: 100, target_entity: "city"}
+
+  - query: "What cities are within 50 km of München?"
+    output: {spatial: ["München"], operations: ["Buffer", "Within"], distance_km: 50, target_entity: "city"}

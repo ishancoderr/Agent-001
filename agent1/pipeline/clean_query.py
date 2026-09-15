@@ -3,7 +3,7 @@ CleanQuery — normalizes a raw user query BEFORE it ever reaches the
 classifier or extractor. Known state/city name mentions (in any alias,
 spelling, capitalization, or hyphenation form) are rewritten to their exact
 database spelling directly in the query text, using the gazetteer built from
-name_aliases.json.
+name_aliases.yaml.
 
 Doing this once, up front, means _classify() and _extract() only ever see
 canonical names — the LLM's job becomes "copy this name" rather than
@@ -27,6 +27,8 @@ class CleanQuery:
     """
 
     def __init__(self, raw_query: str):
+        """Store the original text and immediately compute the cleaned
+        version, so `.cleaned` is ready as soon as the object exists."""
         self.raw_query = raw_query
         self.cleaned = self._clean(raw_query)
 

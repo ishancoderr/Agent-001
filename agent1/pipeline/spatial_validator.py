@@ -13,10 +13,22 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..database import SessionLocal
+from .entity_schema import get_schema
 from .gazetteer import normalize_entity_name
 from .query_parser import QueryParams, SpatialRelationship
 
 log = logging.getLogger("agent1.pipeline.spatial")
+
+# Adjacency/direction/distance are always about states, and city-coordinate
+# resolution is always about cities — which entity type each function in
+# this file operates on is a fact about what these query categories mean,
+# not something to parameterize. The table/column *names* used to reach
+# them, though, used to be hardcoded here too ("states", "state_name",
+# "geo_shape", "cities", "city_name", "lat", "lng") — duplicating what
+# config/schema/entities.yaml already declares. These two are read from
+# there once, and every SQL string below builds its identifiers from them.
+_STATE_SCHEMA = get_schema("state")
+_CITY_SCHEMA = get_schema("city")
 
 
 def _all_state_geometries(db: Session) -> Tuple[List[Tuple[str, str]], List[str]]:
@@ -40,7 +52,10 @@ def _all_state_geometries(db: Session) -> Tuple[List[Tuple[str, str]], List[str]
     Returns (pairs, still_missing) — still_missing lists states neither store
     could supply a shape for.
     """
-    rows = db.execute(text("SELECT state_name, ST_AsText(geo_shape) FROM states")).fetchall()
+    rows = db.execute(text(
+        f"SELECT {_STATE_SCHEMA['key_column']}, ST_AsText({_STATE_SCHEMA['geometry_column']}) "
+        f"FROM {_STATE_SCHEMA['table']}"
+    )).fetchall()
     held: dict = {name: wkt for name, wkt in rows if wkt is not None}
     missing = [name for name, wkt in rows if wkt is None]
     if not missing:
@@ -67,9 +82,13 @@ def _all_state_geometries(db: Session) -> Tuple[List[Tuple[str, str]], List[str]
 
 
 def _geoms_cte(pairs: List[Tuple[str, str]]) -> Tuple[str, dict]:
-    """A 'geoms(state_name, shape)' CTE fragment and its bound parameters,
-    built from (name, wkt) pairs, so a query can join against every state's
-    shape without any of them living in the `states` table."""
+    """A 'geoms(<state key column>, shape)' CTE fragment and its bound
+    parameters, built from (name, wkt) pairs, so a query can join against
+    every state's shape without any of them living in the `states` table.
+    `shape` is this CTE's own internal alias for the geometry value, not a
+    real column name, so it stays a fixed literal — only the first column's
+    name (the state's actual key column) is a schema identifier."""
+    key_col = _STATE_SCHEMA["key_column"]
     params: dict = {}
     rows_sql = []
     for i, (name, wkt) in enumerate(pairs):
@@ -77,7 +96,7 @@ def _geoms_cte(pairs: List[Tuple[str, str]]) -> Tuple[str, dict]:
         params[f"gw{i}"] = wkt
         rows_sql.append(f"(:gn{i}, ST_GeomFromText(:gw{i}, 4326))")
     values_sql = ",\n                ".join(rows_sql)
-    cte = f"geoms(state_name, shape) AS (\n                VALUES {values_sql}\n            )"
+    cte = f"geoms({key_col}, shape) AS (\n                VALUES {values_sql}\n            )"
     return cte, params
 
 
@@ -90,6 +109,9 @@ _DIRECTION_SQL = {
 
 
 def validate_spatial(params: QueryParams) -> QueryParams:
+    """Entry point: dispatch an adjacency/direction/distance query to its
+    resolver, then fill in `spatial`, `unknown_states` and `verdict` on the
+    same params object before returning it."""
     if params.query_type == "DIRECT_LOOKUP":
         log.info("       │ DIRECT_LOOKUP — spatial resolution skipped")
         return params
@@ -159,23 +181,26 @@ def _verdict_for(rel: Optional[SpatialRelationship], qualifying: List[str],
 
 
 def _adjacency(rel: SpatialRelationship, db: Session) -> Tuple[List[str], List[str]]:
+    """States touching every ref in rel.refs (ST_Intersects minus the
+    touching-itself case), intersected across refs when there's more than one."""
     pairs, unknown = _all_state_geometries(db)
     if not pairs:
         return [], unknown
     cte, geom_params = _geoms_cte(pairs)
 
+    key_col = _STATE_SCHEMA["key_column"]
     sets: List[set] = []
     for ref in rel.refs:
         rows = db.execute(
             text(f"""
                 WITH {cte}
-                SELECT g2.state_name
+                SELECT g2.{key_col}
                 FROM geoms g1
                 JOIN geoms g2
                   ON ST_Intersects(g1.shape, g2.shape)
                  AND NOT ST_Equals(g1.shape, g2.shape)
-                WHERE g1.state_name = :ref
-                  AND g2.state_name != :ref
+                WHERE g1.{key_col} = :ref
+                  AND g2.{key_col} != :ref
             """),
             {**geom_params, "ref": ref},
         ).fetchall()
@@ -191,6 +216,8 @@ def _adjacency(rel: SpatialRelationship, db: Session) -> Tuple[List[str], List[s
 
 
 def _direction(rel: SpatialRelationship, db: Session) -> Tuple[List[str], List[str]]:
+    """States whose centroid bearing from rel.refs[0]'s centroid falls in
+    rel.type's compass sector (north/south/east/west_of), nearest first."""
     ref  = rel.refs[0] if rel.refs else "Bayern"
     cond = _DIRECTION_SQL.get(rel.type, _DIRECTION_SQL["north_of"])
 
@@ -199,19 +226,20 @@ def _direction(rel: SpatialRelationship, db: Session) -> Tuple[List[str], List[s
         return [], unknown
     cte, geom_params = _geoms_cte(pairs)
 
+    key_col = _STATE_SCHEMA["key_column"]
     rows = db.execute(
         text(f"""
             WITH {cte},
             azimuths AS (
-                SELECT g2.state_name,
+                SELECT g2.{key_col},
                        degrees(ST_Azimuth(
                            ST_Centroid(g1.shape),
                            ST_Centroid(g2.shape))) AS az
                 FROM geoms g1
-                JOIN geoms g2 ON g1.state_name != g2.state_name
-                WHERE g1.state_name = :ref
+                JOIN geoms g2 ON g1.{key_col} != g2.{key_col}
+                WHERE g1.{key_col} = :ref
             )
-            SELECT state_name FROM azimuths WHERE {cond} ORDER BY az
+            SELECT {key_col} FROM azimuths WHERE {cond} ORDER BY az
         """),
         {**geom_params, "ref": ref},
     ).fetchall()
@@ -236,6 +264,11 @@ def _resolve_city_coords(city: str, db: Session):
       4. Partial ILIKE match (city name contains the search term)
     Returns (lat, lng) tuple or None if not found.
     """
+    key_col = _CITY_SCHEMA["key_column"]
+    table = _CITY_SCHEMA["table"]
+    lat_col = _CITY_SCHEMA["lat_column"]
+    lng_col = _CITY_SCHEMA["lng_column"]
+
     candidates = list(dict.fromkeys(filter(None, [
         normalize_entity_name(city, "city"),   # the spelling the database uses
         city,                                  # then the name as given
@@ -244,7 +277,7 @@ def _resolve_city_coords(city: str, db: Session):
     # Exact and alias matches first
     for name in candidates:
         row = db.execute(
-            text("SELECT lat, lng FROM cities WHERE city_name = :n LIMIT 1"),
+            text(f"SELECT {lat_col}, {lng_col} FROM {table} WHERE {key_col} = :n LIMIT 1"),
             {"n": name},
         ).fetchone()
         if row:
@@ -254,7 +287,7 @@ def _resolve_city_coords(city: str, db: Session):
     # Case-insensitive full match
     for name in candidates:
         row = db.execute(
-            text("SELECT lat, lng, city_name FROM cities WHERE city_name ILIKE :n LIMIT 1"),
+            text(f"SELECT {lat_col}, {lng_col}, {key_col} FROM {table} WHERE {key_col} ILIKE :n LIMIT 1"),
             {"n": name},
         ).fetchone()
         if row:
@@ -264,10 +297,10 @@ def _resolve_city_coords(city: str, db: Session):
     # Partial match — order by name length so shortest (most exact) match wins
     for name in candidates:
         row = db.execute(
-            text("""
-                SELECT lat, lng, city_name FROM cities
-                WHERE city_name ILIKE :n
-                ORDER BY LENGTH(city_name)
+            text(f"""
+                SELECT {lat_col}, {lng_col}, {key_col} FROM {table}
+                WHERE {key_col} ILIKE :n
+                ORDER BY LENGTH({key_col})
                 LIMIT 1
             """),
             {"n": f"%{name}%"},
@@ -334,6 +367,8 @@ def _parse_point_wkt(wkt: str) -> Optional[Tuple[float, float]]:
 # different answers for a state sitting near the boundary.
 
 def _distance(rel: SpatialRelationship, db: Session) -> Tuple[List[str], List[str]]:
+    """States whose shape is within rel.distance_km of rel.refs[0] (a city,
+    resolved to lat/lng first), nearest first, via ST_DWithin/ST_Distance."""
     # A missing reference or threshold makes the question unanswerable. Filling
     # either one in with a default would return a confident answer to a
     # question nobody asked, so the query is refused instead.
@@ -363,10 +398,11 @@ def _distance(rel: SpatialRelationship, db: Session) -> Tuple[List[str], List[st
         return [], unknown
     cte, geom_params = _geoms_cte(pairs)
 
+    key_col = _STATE_SCHEMA["key_column"]
     rows = db.execute(
         text(f"""
             WITH {cte}
-            SELECT state_name
+            SELECT {key_col}
             FROM geoms
             WHERE ST_DWithin(
                 shape::geography,

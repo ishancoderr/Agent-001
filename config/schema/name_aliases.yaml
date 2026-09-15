@@ -1,0 +1,55 @@
+# Canonical name/alias gazetteer data — the single source of truth for German
+# state and city name spellings, loaded by agent1/pipeline/gazetteer.py.
+#
+# `state` is a flat list: state names are always spelled the way the database
+# stores them, so no alias mapping is needed beyond the case/diacritic/
+# hyphenation folding gazetteer.py's _normalize_key() already does.
+#
+# `city` only needs an entry when there's an alias worth recording. A city
+# whose name has no genuinely different form (Frankfurt, Stuttgart, ...) can
+# simply be left out — city is not enumerable (entities.yaml), so an unlisted
+# name isn't rejected, it just falls through to the DB's own ILIKE matching.
+# List a city here only for genuinely different WORDS, e.g. Munich vs
+# München — never for a spelling/case/diacritic variant of the same word,
+# since _normalize_key() already folds those together with no alias entry
+# needed (that's why Düsseldorf is listed with an empty alias list below,
+# not left out: its umlaut spelling in the DB might look like it needs the
+# same treatment as Munich/Cologne/Nuremberg, but "Düsseldorf" IS the English
+# name too, and folding alone already matches duesseldorf/dusseldorf/düsseldorf
+# to it).
+#
+# Adding a state is a one-line addition to `state`; adding a city is a new
+# `canonical: [aliases...]` entry under `city`. Either is a data edit here,
+# never a code change in gazetteer.py.
+#
+# Verified directly against Agent-1's `states.state_name` and `cities.city_name`
+# columns (2026-09-02), not assumed:
+#   - The 16 state names are stored with full umlauts (Baden-Württemberg, ...).
+#   - Most cities are stored in their English form: Munich, Cologne, Nuremberg.
+#   - Düsseldorf is the one exception — it keeps its German umlaut spelling in
+#     the DB, unlike Munich/Cologne/Nuremberg.
+
+state:
+  - Baden-Württemberg
+  - Bayern
+  - Berlin
+  - Brandenburg
+  - Bremen
+  - Hamburg
+  - Hessen
+  - Mecklenburg-Vorpommern
+  - Niedersachsen
+  - Nordrhein-Westfalen
+  - Rheinland-Pfalz
+  - Saarland
+  - Sachsen
+  - Sachsen-Anhalt
+  - Schleswig-Holstein
+  - Thüringen
+
+city:
+  Munich:     [münchen, muenchen, munich]
+  Cologne:    [köln, koeln, cologne]
+  Nuremberg:  [nürnberg, nuernberg, nuremberg]
+  Düsseldorf: [dusseldrof]   # common transposition typo, not a real spelling variant
+
