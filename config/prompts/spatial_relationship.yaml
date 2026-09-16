@@ -98,3 +98,54 @@ examples:
 
   - query: "Is Sachsen within 100 km of Dortmund?"
     output: {spatial: "all", temporal: [2021], attributes: [], spatial_relationship: {type: "distance", subject: "Sachsen", refs: ["Dortmund"], distance_km: 100}}
+
+# Stage-3 examples for this category — the shapes
+# agent1/pipeline/spatial_validator.py needs to turn adjacency/direction/
+# distance into a candidate state list via PostGIS. Every state's geometry
+# (not just the ones named) has to be tested, since a state with no shape
+# must be excluded from the candidate set rather than silently vanish from
+# it (see spatial_validator.py's own comment on why) — so these queries take
+# the FULL set of (name, WKT) pairs already resolved in Python (locally
+# held, or fetched from the peer for this computation only) as two array
+# parameters, and turn them into rows with unnest() inside a CTE, rather
+# than one placeholder pair per state — that shape never changes size no
+# matter how many states are actually being tested, so it can be generated
+# once and reused, unlike a query with one :name0/:wkt0, :name1/:wkt1, ...
+# pair per row. See config/prompts/sql_generation.yaml for the shared rules,
+# including the CTE-naming rule this depends on.
+sql_generation:
+  examples:
+    - request: "The name and WKT text of every federal state's own geometry, straight from the state table, no filtering. Alias the name column exactly as entity_name and the WKT column exactly as wkt."
+      output:
+        sql: "SELECT state_name AS entity_name, ST_AsText(geo_shape) AS wkt FROM states"
+        params: {}
+
+    - request: "Given the full set of federal states' own (name, WKT) pairs as two parallel array parameters, which of them touch (share a border with, but are not identical to) a given reference state name. Use exactly :names for the array of names, exactly :wkts for the array of matching WKT text, and exactly :ref for the reference state's name. Build a CTE named exactly geoms with columns entity_name and shape from unnest(:names, :wkts), self-join it to compare every pair, and require ST_Intersects true while ST_Equals is false so a state is never reported as touching itself. Alias the result column exactly as entity_name."
+      output:
+        sql: "WITH geoms(entity_name, shape) AS (SELECT entity_name, ST_GeomFromText(wkt, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(entity_name, wkt)) SELECT g2.entity_name FROM geoms g1 JOIN geoms g2 ON ST_Intersects(g1.shape, g2.shape) AND NOT ST_Equals(g1.shape, g2.shape) WHERE g1.entity_name = :ref AND g2.entity_name != :ref"
+        params: {names: ["Bayern", "Sachsen"], wkts: ["POLYGON((...))", "POLYGON((...))"], ref: "Bayern"}
+
+    - request: "Given the full set of federal states' own (name, WKT) pairs as two parallel array parameters, which of them lie north of a given reference state's centroid (compass bearing at most 45 degrees or at least 315 degrees from the reference's centroid), nearest bearing first. Use exactly :names for the array of names, exactly :wkts for the array of matching WKT text, and exactly :ref for the reference state's name. Build a CTE named exactly geoms with columns entity_name and shape from unnest(:names, :wkts), then a second CTE named exactly azimuths with its own explicit columns entity_name and az computing each other state's compass bearing in degrees from the reference's centroid to its own centroid, then filter and order by that bearing. Alias the result column exactly as entity_name."
+      output:
+        sql: "WITH geoms(entity_name, shape) AS (SELECT entity_name, ST_GeomFromText(wkt, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(entity_name, wkt)), azimuths(entity_name, az) AS (SELECT g2.entity_name, degrees(ST_Azimuth(ST_Centroid(g1.shape), ST_Centroid(g2.shape))) FROM geoms g1 JOIN geoms g2 ON g1.entity_name != g2.entity_name WHERE g1.entity_name = :ref) SELECT entity_name FROM azimuths WHERE (az <= 45 OR az >= 315) ORDER BY az"
+        params: {names: ["Bayern", "Sachsen"], wkts: ["POLYGON((...))", "POLYGON((...))"], ref: "Bayern"}
+
+    - request: "Given the full set of federal states' own (name, WKT) pairs as two parallel array parameters, which of them lie within a given distance (in metres) of a given reference point (longitude/latitude), nearest first. Use exactly :names for the array of names, exactly :wkts for the array of matching WKT text, exactly :lng and :lat for the reference point, and exactly :dist for the distance in metres. Build a CTE named exactly geoms with columns entity_name and shape from unnest(:names, :wkts), filter with ST_DWithin against the point (cast both sides to geography) and order by ST_Distance the same way. Alias the result column exactly as entity_name."
+      output:
+        sql: "WITH geoms(entity_name, shape) AS (SELECT entity_name, ST_GeomFromText(wkt, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(entity_name, wkt)) SELECT entity_name FROM geoms WHERE ST_DWithin(shape::geography, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography, :dist) ORDER BY ST_Distance(shape::geography, ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography)"
+        params: {names: ["Bayern", "Sachsen"], wkts: ["POLYGON((...))", "POLYGON((...))"], lng: 7.4653, lat: 51.5136, dist: 100000}
+
+    - request: "The (latitude, longitude) of the city whose name exactly equals a given value. Use exactly :name for the name to match. Alias the latitude column exactly as lat and the longitude column exactly as lng."
+      output:
+        sql: "SELECT lat AS lat, lng AS lng FROM cities WHERE city_name = :name LIMIT 1"
+        params: {name: "Dortmund"}
+
+    - request: "The matched name, latitude and longitude of the city whose name case-insensitively equals a given value. Use exactly :name for the value to match against. Alias the matched name column exactly as entity_name, the latitude column exactly as lat, and the longitude column exactly as lng."
+      output:
+        sql: "SELECT city_name AS entity_name, lat AS lat, lng AS lng FROM cities WHERE city_name ILIKE :name LIMIT 1"
+        params: {name: "dortmund"}
+
+    - request: "The matched name, latitude and longitude of the city whose name contains a given value (partial, case-insensitive match), shortest matching name first. Use exactly :name for the value to search for (already wrapped in %...% wildcards). Alias the matched name column exactly as entity_name, the latitude column exactly as lat, and the longitude column exactly as lng."
+      output:
+        sql: "SELECT city_name AS entity_name, lat AS lat, lng AS lng FROM cities WHERE city_name ILIKE :name ORDER BY LENGTH(city_name) LIMIT 1"
+        params: {name: "%dort%"}

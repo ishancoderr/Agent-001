@@ -57,6 +57,15 @@ _AMBIGUOUS_DEFAULT = _ENTITIES_DOC.get("ambiguous_name_default")
 
 GERMAN_STATES: list[str] = _data["state"]
 
+# Every enabled entity type, in entities.yaml's own declared order — what
+# `gazetteer: all` (config/prompts/direct_lookup.yaml, via
+# prompt_loader.py's _render_gazetteer()) iterates over, so a newly-added
+# entity type starts appearing there with no prompt change. Same "enabled"
+# filter agent1/pipeline/query_params.py's VALID_ENTITY_TYPES uses.
+ENABLED_ENTITY_TYPES: list[str] = [
+    name for name, spec in _ENTITIES.items() if spec.get("enabled", True)
+]
+
 
 def _normalize_key(text: str) -> str:
     """Fold a name down to a bare matching key: lowercase, strip diacritics

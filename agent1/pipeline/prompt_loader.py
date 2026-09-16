@@ -46,21 +46,39 @@ def _load_attribute_rules(entity: str) -> str:
     """Build the "Valid attributes: ..." block for `entity` from
     config/schema/attributes.yaml: a header naming every column, then one
     bullet per column that declares aliases, mapping every recognized phrase
-    to the canonical name the extractor must output."""
+    to the canonical name the extractor must output. Collects every
+    attribute_tables entry for `entity`, not just the first one found — an
+    entity can have more than one attribute table."""
     data = yaml.safe_load(_ATTRIBUTES_PATH.read_text(encoding="utf-8"))
-    for table in data["attribute_tables"]:
-        if table["entity"] != entity:
-            continue
+    tables = [t for t in data["attribute_tables"] if t["entity"] == entity]
+    if not tables:
+        raise KeyError(f"No attribute_tables entry for entity={entity!r} in {_ATTRIBUTES_PATH}")
+    lines: List[str] = []
+    for table in tables:
         columns = table["columns"]
-        lines = [f"Valid attributes: {', '.join(columns)}"]
+        lines.append(f"Valid attributes: {', '.join(columns)}")
         for canonical, spec in columns.items():
             aliases = spec.get("aliases") or []
             if not aliases:
                 continue
             quoted = ", ".join(f'"{a}"' for a in aliases)
             lines.append(f'  - {quoted} → always output "{canonical}"')
-        return "\n".join(lines)
-    raise KeyError(f"No attribute_tables entry for entity={entity!r} in {_ATTRIBUTES_PATH}")
+    return "\n".join(lines)
+
+
+def _all_attribute_entities() -> List[str]:
+    """Every entity type with at least one attribute_tables entry, in
+    config/schema/attributes.yaml's own order — what `attributes_entity:
+    all` iterates over, so a template listing every attribute-bearing
+    entity's valid columns (direct_lookup.yaml: a plain data query could be
+    about any of them) never needs a prompt or Python change when a new one
+    is added; it only needs its own attributes.yaml entry."""
+    data = yaml.safe_load(_ATTRIBUTES_PATH.read_text(encoding="utf-8"))
+    seen: List[str] = []
+    for table in data["attribute_tables"]:
+        if table["entity"] not in seen:
+            seen.append(table["entity"])
+    return seen
 
 
 # ── Section renderers ─────────────────────────────────────────────────────
@@ -78,26 +96,66 @@ def _render_plain(field: str) -> Callable[[Dict[str, Any]], List[str]]:
 
 
 def _render_gazetteer(doc: Dict[str, Any]) -> List[str]:
-    """Render one names block per entity type in doc["gazetteer"] (e.g.
-    ["state", "city"]), in that order — one list entry per block.
+    """Render one names block per entity type in doc["gazetteer"]: an
+    explicit list (e.g. ["state", "city"]) when a category is only ever
+    about those specific types — spatial_relationship_buffer.yaml's ["city"]
+    is a fact about what that category means, not something a new entity
+    type should widen — or one of two sentinels:
+
+    - "all": every enabled entity type in entities.yaml, for a category
+      that can genuinely name any of them (a GEOMETRY_LOOKUP can ask about
+      any entity that has a shape).
+    - "attributes": every entity type that has at least one attribute table
+      in attributes.yaml (direct_lookup.yaml's own case) — deliberately
+      narrower than "all": a plain data query can only be about an entity
+      that actually has data, so an entity that exists (e.g. today, city)
+      but has nothing to look up never appears here, which would otherwise
+      let the model extract an entity_type with no attributes.yaml table
+      to answer it from.
 
     Which entity types exist, and their prompt wording, live in
     config/schema/entities.yaml (via gazetteer.get_names_block) — not a
     dict here, so a new entity type there needs no change in this file."""
-    return [gazetteer.get_names_block(kind) for kind in doc.get("gazetteer", [])]
+    spec = doc.get("gazetteer", [])
+    if spec == "all":
+        kinds = gazetteer.ENABLED_ENTITY_TYPES
+    elif spec == "attributes":
+        kinds = _all_attribute_entities()
+    else:
+        kinds = spec
+    return [gazetteer.get_names_block(kind) for kind in kinds]
 
 
 def _render_attributes(doc: Dict[str, Any]) -> List[str]:
-    """Render the "Valid attributes" block for doc["attributes_entity"],
-    with doc["attribute_rules"] (if any) tacked on as one more bullet."""
+    """Render the "Valid attributes" block(s) for doc["attributes_entity"]:
+
+    - a single entity name (e.g. spatial_relationship.yaml's "state") when
+      the category is inherently about one specific entity — a fact about
+      what that category means (adjacency/direction/distance only ever
+      resolve states), not something a new attribute table should change.
+    - the literal "all" (direct_lookup.yaml) when the category is a plain
+      data lookup that could be about any attribute-bearing entity: every
+      one of them is rendered, each under its own "<Entity> attributes:"
+      header once there's more than one, so a new entity with its own
+      attributes.yaml table appears here automatically.
+
+    doc["attribute_rules"] (if any) is tacked on as one more bullet, once,
+    after every entity's block."""
     entity = doc.get("attributes_entity")
     if not entity:
         return []
-    block = _load_attribute_rules(entity)
+    entities = _all_attribute_entities() if entity == "all" else [entity]
+    blocks = []
+    for e in entities:
+        block = _load_attribute_rules(e)
+        if len(entities) > 1:
+            block = f"{e.capitalize()} attributes:\n{block}"
+        blocks.append(block)
+    combined = "\n\n".join(blocks)
     extra = doc.get("attribute_rules")
     if extra:
-        block += "\n  - " + extra
-    return [block]
+        combined += "\n  - " + extra
+    return [combined]
 
 
 def _render_operations(doc: Dict[str, Any]) -> List[str]:

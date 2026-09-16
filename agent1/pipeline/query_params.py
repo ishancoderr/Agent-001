@@ -48,10 +48,36 @@ VALID_ATTRS = {column for table in _ATTRIBUTE_TABLES for column in table["column
 # Every enabled entity type declared in entities.yaml — same reasoning: this
 # used to be a hardcoded {"city", "state"} that entities.yaml's own "adding
 # an entity type needs no Python changes" promise didn't actually hold for.
-_ENTITIES = yaml.safe_load(
-    (_SCHEMA_DIR / "entities.yaml").read_text(encoding="utf-8")
-)["entities"]
+_ENTITIES_DOC = yaml.safe_load((_SCHEMA_DIR / "entities.yaml").read_text(encoding="utf-8"))
+_ENTITIES = _ENTITIES_DOC["entities"]
 VALID_ENTITY_TYPES = {name for name, spec in _ENTITIES.items() if spec.get("enabled", True)}
+
+# The entity type assumed whenever a query doesn't determine one of its own —
+# entities.yaml's own `ambiguous_name_default` (the same value gazetteer.py
+# resolves an ambiguous name like "Berlin" to when a query names it without
+# saying city or state). Reused here rather than a second, separately-typed
+# "state" fallback: DIRECT_LOOKUP's extraction prompt has no entity_type
+# field of its own yet (see config/prompts/direct_lookup.yaml), so
+# agent1/retrieval/local_store.py falls back to this exact same config value
+# instead of a Python literal, for the same reason gazetteer.py does.
+DEFAULT_ENTITY_TYPE = _ENTITIES_DOC.get("ambiguous_name_default")
+
+
+def default_attribute_for(entity_type: str) -> str:
+    """The attribute a DIRECT_LOOKUP query defaults to when it names none
+    that validates — a data lookup needs at least one attribute to answer,
+    but guessing which one must not mean assuming every entity's default is
+    state's "population". This is the first column declared under
+    `entity_type`'s own attribute table(s) in config/schema/attributes.yaml,
+    so a new entity's own default comes from its own schema, not a copy of
+    another entity's."""
+    for table in _ATTRIBUTE_TABLES:
+        if table["entity"] == entity_type:
+            return next(iter(table["columns"]))
+    raise KeyError(
+        f"No attribute_tables entry for entity={entity_type!r} in attributes.yaml — "
+        f"cannot default an attribute for an entity with no attributes at all."
+    )
 
 
 @dataclass

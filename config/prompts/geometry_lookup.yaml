@@ -75,3 +75,30 @@ examples:
         - {entity_name: "Sachsen-Anhalt", entity_type: "state"}
         - {entity_name: "Schleswig-Holstein", entity_type: "state"}
         - {entity_name: "Thüringen", entity_type: "state"}
+
+# Stage-3 examples for this category — the three shapes
+# agent1/retrieval/sql_generator.py's entity_exact_geometry()/entity_exists()/
+# entity_ilike_geometry() need to resolve one named entity (state or city)
+# to its own geometry: an exact match, an existence-only check (the row is
+# there but its shape is NULL — a different case from "not held at all"),
+# and a case-insensitive fallback. Each is generated once per entity_type
+# and reused for every future lookup of that shape — see SqlGenerator's
+# caching. Placeholder names are prescribed for exactly that reason: a
+# cached statement is reused with fresh values under the same names, never
+# regenerated. See config/prompts/sql_generation.yaml for the shared rules.
+sql_generation:
+  examples:
+    - request: "The WKT text and matched name of the federal state whose name exactly equals a given value, only if it has a non-null geometry. Use exactly :name for the name to match. Alias the WKT column exactly as wkt and the matched name column exactly as entity_name."
+      output:
+        sql: "SELECT ST_AsText(geo_shape) AS wkt, state_name AS entity_name FROM states WHERE state_name = :name AND geo_shape IS NOT NULL LIMIT 1"
+        params: {name: "Bayern"}
+
+    - request: "Whether this agent holds any row at all for the city whose name exactly equals a given value, regardless of whether its geometry is filled in. Use exactly :name for the name to match. Return one row aliased exactly as found if a row exists, no rows otherwise."
+      output:
+        sql: "SELECT 1 AS found FROM cities WHERE city_name = :name LIMIT 1"
+        params: {name: "München"}
+
+    - request: "The WKT text and matched name of the city whose name case-insensitively matches a given value, only if it has a non-null geometry. Use exactly :name for the value to match against. Alias the WKT column exactly as wkt and the matched name column exactly as entity_name."
+      output:
+        sql: "SELECT ST_AsText(centroid) AS wkt, city_name AS entity_name FROM cities WHERE city_name ILIKE :name AND centroid IS NOT NULL LIMIT 1"
+        params: {name: "münchen"}

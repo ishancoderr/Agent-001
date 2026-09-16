@@ -1,6 +1,17 @@
 """
 Resolve MissingGeometrySlot requests against Agent-1's local cities/states catalog.
 Returns WKT geometries (SRID 4326) for cities (centroid) and states (geo_shape).
+
+Every SQL statement below comes from SqlGenerator (agent1/retrieval/
+sql_generator.py) rather than being hand-written here: table/column
+identifiers, which entity_type maps to which table, and the SQL text itself
+are all resolved from config/schema/entities.yaml through it, not duplicated
+in this file. Each shape (an exact-name lookup, a buffer, a binary
+operation, ...) is generated once per process and reused — see
+SqlGenerator._cached_query() — since none of these statements' SQL TEXT
+varies by anything other than which entity_type/operation they're for; only
+the bound values differ call to call, and those always travel as
+SQLAlchemy params, never interpolated into the SQL text.
 """
 from __future__ import annotations
 
@@ -13,6 +24,8 @@ from kqml_messaging import EntityType, MissingGeometrySlot, FoundGeometrySlot, M
 
 from ..database import SessionLocal
 from ..pipeline.gazetteer import normalize_entity_name
+from ..pipeline.query_params import VALID_ENTITY_TYPES
+from .sql_generator import BuiltQuery, SqlGenerator, ENTITY_ALIAS, WKT_ALIAS, SRID_ALIAS, MEETS_ZONE_ALIAS
 
 log = logging.getLogger("agent1.retrieval.geometry_resolver")
 
@@ -20,6 +33,26 @@ log = logging.getLogger("agent1.retrieval.geometry_resolver")
 # name/alias JSON and verified against the database — see pipeline/gazetteer.py.
 # Private alias tables used to live here and in spatial_validator, pointing in
 # opposite directions; each produced names the database does not hold.
+
+# Buffer/within functions below are specifically about cities — which entity
+# type they operate on is a fact about what those operations mean (see their
+# own docstrings), not something to parameterize.
+
+# One generator per process so its per-shape SQL cache (_cached_query()) is
+# actually shared across every lookup this module ever does, not rebuilt —
+# and re-validated by an LLM call — on every single call.
+_generator = SqlGenerator()
+
+
+def _run(db, built: BuiltQuery, queries: Optional[List[str]] = None):
+    """Execute a built statement and record its readable form for the log,
+    the same convention agent1/retrieval/local_store.py's LocalStore._run()
+    uses — a statement is never run without its human-readable form (values
+    substituted, never executed) being available for the query trace."""
+    if queries is not None:
+        queries.append(built.readable)
+    log.debug("SQL > %s\n%s", built.label, built.readable)
+    return db.execute(text(built.sql), built.params)
 
 
 def resolve_geometries(
@@ -78,7 +111,7 @@ def _lookup(entity_name: str, entity_type: str, db, queries: Optional[List[str]]
     every attempted SQL statement (values substituted, for readability) is
     appended to it.
     """
-    if entity_type not in ("city", "state"):
+    if entity_type not in VALID_ENTITY_TYPES:
         log.warning("       │ Unknown entity_type %r for %r — skipping", entity_type, entity_name)
         return None, None, False
 
@@ -88,58 +121,28 @@ def _lookup(entity_name: str, entity_type: str, db, queries: Optional[List[str]]
         entity_name,                       # then the name as given
     ])))
 
-    table    = "cities" if entity_type == "city"  else "states"
-    col      = "centroid" if entity_type == "city" else "geo_shape"
-    name_col = "city_name" if entity_type == "city" else "state_name"
-
     # 1 — exact match with valid geometry (alias first, then original)
     for name in candidates:
-        sql = (f"SELECT ST_AsText({col}), {name_col} FROM {table} "
-               f"WHERE {name_col} = '{name}' AND ST_AsText({col}) IS NOT NULL LIMIT 1")
-        if queries is not None:
-            queries.append(sql)
-        row = db.execute(
-            text(f"""
-                SELECT ST_AsText({col}), {name_col} FROM {table}
-                WHERE {name_col} = :n AND ST_AsText({col}) IS NOT NULL
-                LIMIT 1
-            """),
-            {"n": name},
-        ).fetchone()
+        row = _run(db, _generator.entity_exact_geometry(name, entity_type), queries).fetchone()
         if row:
-            log.info("       │ Resolved (exact)  : %r → %r", entity_name, row[1])
-            return row[0], row[1], True
+            matched_name = row._mapping[ENTITY_ALIAS]
+            log.info("       │ Resolved (exact)  : %r → %r", entity_name, matched_name)
+            return row._mapping[WKT_ALIAS], matched_name, True
 
     # 2 — entity exists but geometry is NULL → stop here, do NOT fall through to partial
     for name in candidates:
-        sql = f"SELECT 1 FROM {table} WHERE {name_col} = '{name}' LIMIT 1"
-        if queries is not None:
-            queries.append(sql)
-        exists = db.execute(
-            text(f"SELECT 1 FROM {table} WHERE {name_col} = :n LIMIT 1"),
-            {"n": name},
-        ).fetchone()
+        exists = _run(db, _generator.entity_exists(name, entity_type), queries).fetchone()
         if exists:
             log.info("       │ %s %r found in DB but geometry is NULL — will ask peer", entity_type, name)
             return None, None, True
 
     # 3 — entity not in DB at all: try case-insensitive full match with valid geometry
     for name in candidates:
-        sql = (f"SELECT ST_AsText({col}), {name_col} FROM {table} "
-               f"WHERE {name_col} ILIKE '{name}' AND ST_AsText({col}) IS NOT NULL LIMIT 1")
-        if queries is not None:
-            queries.append(sql)
-        row = db.execute(
-            text(f"""
-                SELECT ST_AsText({col}), {name_col} FROM {table}
-                WHERE {name_col} ILIKE :n AND ST_AsText({col}) IS NOT NULL
-                LIMIT 1
-            """),
-            {"n": name},
-        ).fetchone()
+        row = _run(db, _generator.entity_ilike_geometry(name, entity_type), queries).fetchone()
         if row:
-            log.info("       │ Resolved (ilike)  : %r → %r", entity_name, row[1])
-            return row[0], row[1], True
+            matched_name = row._mapping[ENTITY_ALIAS]
+            log.info("       │ Resolved (ilike)  : %r → %r", entity_name, matched_name)
+            return row._mapping[WKT_ALIAS], matched_name, True
 
     log.info("       │ %s %r not found in DB (tried: %s)", entity_type, entity_name, candidates)
     return None, None, False
@@ -165,23 +168,13 @@ def build_city_buffer(
     db = SessionLocal()
     try:
         for name in candidates:
-            sql = (f"SELECT city_name, ST_AsText(ST_Buffer(centroid::geography, {distance_km * 1000})::geometry), "
-                   f"ST_SRID(centroid) FROM cities WHERE city_name = '{name}' AND centroid IS NOT NULL LIMIT 1")
-            if queries is not None:
-                queries.append(sql)
-            row = db.execute(
-                text("""
-                    SELECT city_name,
-                           ST_AsText(ST_Buffer(centroid::geography, :dist)::geometry),
-                           ST_SRID(centroid)
-                    FROM cities
-                    WHERE city_name = :n AND centroid IS NOT NULL
-                    LIMIT 1
-                """),
-                {"n": name, "dist": distance_km * 1000},
-            ).fetchone()
+            row = _run(db, _generator.city_buffer(name, distance_km), queries).fetchone()
             if row:
-                return {"ref_name": row[0], "wkt": row[1], "srid": row[2] or 4326}
+                return {
+                    "ref_name": row._mapping[ENTITY_ALIAS],
+                    "wkt": row._mapping[WKT_ALIAS],
+                    "srid": row._mapping[SRID_ALIAS] or 4326,
+                }
         return None
     finally:
         db.close()
@@ -194,19 +187,8 @@ def buffer_from_point(
     from the peer), without requiring a local row for the reference city."""
     db = SessionLocal()
     try:
-        sql = (f"SELECT ST_AsText(ST_Buffer(ST_GeomFromText('{wkt_point[:60]}...', {srid})"
-               f"::geography, {distance_km * 1000})::geometry)")
-        if queries is not None:
-            queries.append(sql)
-        row = db.execute(
-            text("""
-                SELECT ST_AsText(
-                    ST_Buffer(ST_GeomFromText(:wkt, :srid)::geography, :dist)::geometry
-                )
-            """),
-            {"wkt": wkt_point, "srid": srid, "dist": distance_km * 1000},
-        ).fetchone()
-        return {"wkt": row[0], "srid": srid}
+        row = _run(db, _generator.point_buffer(wkt_point, srid, distance_km), queries).fetchone()
+        return {"wkt": row._mapping[WKT_ALIAS], "srid": srid}
     finally:
         db.close()
 
@@ -220,24 +202,13 @@ def cities_within_buffer(
     exclude = [e for e in (exclude or []) if e]
     db = SessionLocal()
     try:
-        sql = (f"SELECT city_name, ST_AsText(centroid), ST_SRID(centroid) FROM cities "
-               f"WHERE centroid IS NOT NULL AND ST_Within(centroid, ST_GeomFromText('{wkt[:60]}...', {srid})) "
-               f"AND NOT (city_name = ANY({exclude}))")
-        if queries is not None:
-            queries.append(sql)
-        rows = db.execute(
-            text("""
-                SELECT city_name, ST_AsText(centroid), ST_SRID(centroid)
-                FROM cities
-                WHERE centroid IS NOT NULL
-                  AND ST_Within(centroid, ST_GeomFromText(:wkt, :srid))
-                  AND NOT (city_name = ANY(:exclude))
-            """),
-            {"wkt": wkt, "srid": srid, "exclude": exclude},
-        ).fetchall()
+        rows = _run(db, _generator.within_buffer(wkt, srid, exclude), queries).fetchall()
         return [
             MessageFactory.found_geometry_slot(
-                spatial_entity=r[0], entity_type=EntityType.CITY, geometry=r[1], srid=r[2] or srid,
+                spatial_entity=r._mapping[ENTITY_ALIAS],
+                entity_type=EntityType.CITY,
+                geometry=r._mapping[WKT_ALIAS],
+                srid=r._mapping[SRID_ALIAS] or srid,
             )
             for r in rows
         ]
@@ -253,14 +224,6 @@ def cities_within_buffer(
 # shapes have arrived. SRID agreement is checked before the operation is
 # attempted, exactly as the document specifies, reusing the same check the
 # kqml_messaging library exposes for this purpose.
-
-_OP_SQL_FN = {
-    "Union": "ST_Union",
-    "Intersection": "ST_Intersection",
-    "Difference": "ST_Difference",          # order matters: fn(A, B) = A minus B
-    "SymDifference": "ST_SymDifference",
-}
-
 
 def resolve_named_geometry(
     name: str, entity_type: str, queries: Optional[List[str]] = None,
@@ -293,9 +256,7 @@ def resolve_named_geometry(
             # different feature that happens to share the name.
             return None
 
-        for et in ("city", "state"):
-            if et == entity_type:
-                continue
+        for et in sorted(VALID_ENTITY_TYPES - {entity_type}):
             wkt, matched_name, _exists = _lookup(name, et, db, queries=queries)
             if wkt is not None:
                 return {"name": matched_name, "wkt": wkt, "srid": 4326}
@@ -312,23 +273,13 @@ def execute_operation(
     geometries. An operation on shapes held in different reference systems is an
     error, checked here before the operation runs rather than after it fails."""
     check_srid_agreement(geom_a["srid"], geom_b["srid"])
-    fn = _OP_SQL_FN[operation]
     db = SessionLocal()
     try:
-        sql = f"SELECT ST_AsText({fn}(<geom_a wkt>, <geom_b wkt>))"
-        if queries is not None:
-            queries.append(sql)
-        row = db.execute(
-            text(f"""
-                SELECT ST_AsText({fn}(
-                    ST_GeomFromText(:wkt_a, :srid_a),
-                    ST_GeomFromText(:wkt_b, :srid_b)
-                ))
-            """),
-            {"wkt_a": geom_a["wkt"], "srid_a": geom_a["srid"],
-             "wkt_b": geom_b["wkt"], "srid_b": geom_b["srid"]},
-        ).fetchone()
-        return {"wkt": row[0], "srid": geom_a["srid"]}
+        built = _generator.binary_operation(
+            operation, geom_a["wkt"], geom_a["srid"], geom_b["wkt"], geom_b["srid"]
+        )
+        row = _run(db, built, queries).fetchone()
+        return {"wkt": row._mapping[WKT_ALIAS], "srid": geom_a["srid"]}
     finally:
         db.close()
 
@@ -355,21 +306,11 @@ def targets_within_buffer(
     try:
         results = []
         for t in targets:
-            sql = (f"SELECT ST_Intersects(<{t['name']} wkt>, "
-                   f"ST_Buffer(<ref wkt>::geography, {distance_km * 1000})::geometry)")
-            if queries is not None:
-                queries.append(sql)
-            row = db.execute(
-                text("""
-                    SELECT ST_Intersects(
-                        ST_GeomFromText(:wkt_t, :srid_t),
-                        ST_Buffer(ST_GeomFromText(:wkt_ref, :srid_ref)::geography, :dist)::geometry
-                    )
-                """),
-                {"wkt_t": t["wkt"], "srid_t": t["srid"], "wkt_ref": ref_geom["wkt"],
-                 "srid_ref": ref_geom["srid"], "dist": distance_km * 1000},
-            ).fetchone()
-            results.append({"name": t["name"], "meets_zone": bool(row[0])})
+            built = _generator.intersects_buffer(
+                t["wkt"], t["srid"], ref_geom["wkt"], ref_geom["srid"], distance_km
+            )
+            row = _run(db, built, queries).fetchone()
+            results.append({"name": t["name"], "meets_zone": bool(row._mapping[MEETS_ZONE_ALIAS])})
         return results
     finally:
         db.close()

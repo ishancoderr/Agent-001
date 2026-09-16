@@ -37,9 +37,9 @@ from .clean_query import CleanQuery
 from .query_extractor import QueryExtractor
 from .gazetteer import GERMAN_STATES  # re-exported: query_controller imports it from here
 from .query_params import (QueryParams,
-                           RELATIONSHIP_TYPES, SpatialRelationship,
+                           DEFAULT_ENTITY_TYPE, RELATIONSHIP_TYPES, SpatialRelationship,
                            VALID_ATTRS, VALID_ENTITY_TYPES, VALID_OPERATIONS,
-                           VALID_QUERY_TYPES)
+                           VALID_QUERY_TYPES, default_attribute_for)
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
@@ -97,8 +97,9 @@ def _years_from(data: Dict[str, Any]) -> List[int]:
     return [year for year in years if 0 < year < 10000]
 
 
-def _attributes_from(data: Dict[str, Any], query_type: str) -> List[str]:
-    """Only the three stored attributes are accepted. A pure spatial question
+def _attributes_from(data: Dict[str, Any], query_type: str, entity_type: str) -> List[str]:
+    """Every declared attribute column, across every entity, is accepted —
+    not just the three state ones (see VALID_ATTRS). A pure spatial question
     asks for the state list itself, so an empty result there is correct and
     must not be filled in with a default the user never asked for."""
     raw = data.get("attributes", [])
@@ -111,8 +112,9 @@ def _attributes_from(data: Dict[str, Any], query_type: str) -> List[str]:
         log.warning("       | Dropped unknown attributes: %s", dropped)
 
     if not attributes and query_type == "DIRECT_LOOKUP":
-        log.warning("       | No valid attributes in %s - defaulting to population", raw)
-        return ["population"]
+        default_attr = default_attribute_for(entity_type)
+        log.warning("       | No valid attributes in %s - defaulting to %s", raw, default_attr)
+        return [default_attr]
     return attributes
 
 
@@ -224,7 +226,7 @@ class QueryParamsBuilder:
                     distance_km = None
                 if operation == "BufferWithin" and distance_km is None:
                     distance_km = 100.0
-                entity_type = data.get("entity_type", "state") or "state"
+                entity_type = data.get("entity_type") or DEFAULT_ENTITY_TYPE
                 log.info("       | SPATIAL_OPERATION : op=%s spatial=%s entity_type=%s distance_km=%s",
                          operation, names, entity_type, distance_km)
                 return QueryParams(
@@ -267,8 +269,29 @@ class QueryParamsBuilder:
             tokens_consumed += extra
 
         # ── Demographic lookup, and the relationships that also ask for data ─────
+        # Only DIRECT_LOOKUP's own extraction prompt (config/prompts/
+        # direct_lookup.yaml) asks the model for entity_type at all — the
+        # relationship types are inherently about states specifically (a
+        # fact about what those categories mean, not something extracted),
+        # so entity_type stays unset for them and agent1/retrieval/
+        # local_store.py never looks at it there either. Validated against
+        # VALID_ENTITY_TYPES the same way GEOMETRY_LOOKUP's own entities are
+        # (_sanitize_entities above) — an untrusted model output, not
+        # assumed correct just because it parsed as a string. Determined
+        # before _attributes_from() so a query with no valid attribute
+        # named defaults to *this* entity's own first attribute, not a
+        # blind "population".
+        entity_type = None
+        if query_type == "DIRECT_LOOKUP":
+            raw_entity_type = data.get("entity_type")
+            if raw_entity_type in VALID_ENTITY_TYPES:
+                entity_type = raw_entity_type
+            elif raw_entity_type:
+                log.warning("       | Unknown entity_type %r for DIRECT_LOOKUP - "
+                            "falling back to the default", raw_entity_type)
+
         temporal = _years_from(data)
-        attributes = _attributes_from(data, query_type)
+        attributes = _attributes_from(data, query_type, entity_type or DEFAULT_ENTITY_TYPE)
         if not attributes:
             log.info("       | Pure spatial question - no data attributes requested")
 
@@ -316,11 +339,12 @@ class QueryParamsBuilder:
         log.info("       | Temporal    : %s (%d years)", temporal, len(temporal))
         log.info("       | Attributes  : %s", attributes)
         log.info("       | Spatial     : %s", spatial)
+        log.info("       | Entity type : %s", entity_type or f"(default: {DEFAULT_ENTITY_TYPE})")
         log.info("       | Tokens      : classify=%d  extract=%d  total=%d",
                  tokens_classify, tokens_consumed - tokens_classify, tokens_consumed)
 
         return QueryParams(
             query_type=query_type, spatial=spatial, temporal=temporal,
             attributes=attributes, spatial_relationship=relationship,
-            raw_query=original_query, **_trace(),
+            entity_type=entity_type, raw_query=original_query, **_trace(),
         ), tokens_consumed

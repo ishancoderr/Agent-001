@@ -8,7 +8,6 @@ import logging
 import time
 import uuid
 from datetime import datetime
-import time as _time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -16,14 +15,12 @@ from pydantic import BaseModel, Field
 
 from ..pipeline import run as run_pipeline
 from ..pipeline.gazetteer import normalize_entity_name
-from ..retrieval import execute_local_lookup
+from ..retrieval import answer_query
 from ..retrieval.geometry_resolver import (
     resolve_geometries, build_city_buffer, buffer_from_point, cities_within_buffer,
     resolve_named_geometry, execute_operation, fold_union, targets_within_buffer,
 )
-from ..messaging import send_kqml_ask
 from ..messaging.kqml_geometry_client import send_kqml_geometry_ask, send_kqml_city_buffer_ask
-from ..result import merge_results
 from ..evaluation import log_evaluation_metrics
 from kqml_messaging import MessageFactory, response_status
 
@@ -243,65 +240,30 @@ def handle_query(body: UserQuery):
             },
         }
 
-    # ── Step 3: Local database lookup ─────────────────────────────────────────
-    log.info("STEP 3 │ Querying Agent-1 local database ...")
+    # ── Steps 3-5: local lookup, KQML ask for gaps, merge — one call now,
+    # in retrieval/local_store.py's answer_query() ─────────────────────────────
+    log.info("STEP 3-5 │ Resolving locally, asking Agent-2 for gaps, merging ...")
     log.info("       │ Looking for %d state(s) × %d year(s) × attrs=%s",
              len(params.spatial), len(params.temporal), params.attributes)
 
-    local_result = execute_local_lookup(params)
+    answered = answer_query(params)
+    local_result   = answered.local_result
+    merged         = answered.merged
+    kqml_turns     = answered.kqml_turns
+    tokens_agent2  = answered.tokens_agent2
+    kqml_exchanges = answered.kqml_exchanges
+    phase1_ms      = answered.phase1_ms
+    phase2_ms      = answered.phase2_ms
+    phase3_ms      = answered.phase3_ms
 
-    log.info("STEP 3 │ Done")
-    log.info("       │ Found    : %d record(s)", len(local_result.found))
-    log.info("       │ Gaps     : %d slot(s)", len(local_result.gaps))
+    log.info("STEP 3-5 │ Done")
+    log.info("       │ Found locally : %d record(s)", len(local_result.found))
+    log.info("       │ Gaps          : %d slot(s)", len(local_result.gaps))
     for i, gap in enumerate(local_result.gaps, 1):
         log.info("       │   Gap %d: spatial=%s  temporal=%s  attrs=%s",
                  i, gap.spatial, gap.temporal, gap.attributes)
-
-    t1 = time.perf_counter()  # end of phase 1
-
-    kqml_turns    = 0
-    tokens_agent2 = 0
-    agent2_data: List[Dict] = []
-    kqml_exchanges: List[Dict] = []
-
-    # ── Step 4: KQML ask to Agent 2 (with retry) ─────────────────────────────
-    if local_result.gaps:
-        log.info("STEP 4 │ Gaps detected – sending KQML ask to Agent-2 ...")
-        log.info("       │ Missing slots to send: %d", len(local_result.gaps))
-        for attempt in range(1, 4):
-            try:
-                resp          = send_kqml_ask(local_result.gaps)
-                kqml_turns    = 1
-                agent2_data   = resp.get("found", [])
-                tokens_agent2 = resp.get("tokens_agent2", 0)
-                if "ask_message" in resp and "tell_message" in resp:
-                    kqml_exchanges.append({"ask": resp["ask_message"], "tell": resp["tell_message"]})
-                log.info("STEP 4 │ KQML tell received from Agent-2 (attempt %d)", attempt)
-                log.info("       │ Agent-2 found   : %d record(s)", len(agent2_data))
-                break
-            except Exception as exc:
-                log.warning("STEP 4 │ Agent-2 attempt %d failed – %s", attempt, exc)
-                if attempt < 3:
-                    _time.sleep(1.0 * attempt)
-                else:
-                    log.warning("STEP 4 │ Agent-2 unreachable after 3 attempts – gaps unresolved")
-    else:
-        log.info("STEP 4 │ Skipped (no gaps – Agent-2 not needed)")
-
-    t2 = time.perf_counter()  # end of phase 2
-
-    # ── Step 5: Merge results ─────────────────────────────────────────────────
-    log.info("STEP 5 │ Merging results ...")
-    merged = merge_results(
-        local_result.found,
-        agent2_data,
-        requested_states=params.spatial,
-        requested_years=params.temporal,
-        requested_attrs=params.attributes,
-    )
-    log.info("STEP 5 │ Done – %d total records", len(merged))
-
-    t3 = time.perf_counter()  # end of phase 3
+    log.info("       │ KQML turns    : %d", kqml_turns)
+    log.info("       │ Merged total  : %d record(s)", len(merged))
 
     # ── Split into three groups ───────────────────────────────────────────────
     attrs = params.attributes
@@ -344,10 +306,7 @@ def handle_query(body: UserQuery):
     status = response_status(has_found=present_pts > 0,
                              has_missing=len(complete_rows) != len(merged))
 
-    phase1_ms = (t1 - t0) * 1000
-    phase2_ms = (t2 - t1) * 1000
-    phase3_ms = (t3 - t2) * 1000
-    total_ms  = (t3 - t0) * 1000
+    total_ms = (time.perf_counter() - t0) * 1000
 
     log.info(SEPARATOR)
     log.info("DONE   │ [%s] status=%s  complete=%d  partial=%d  missing=%d  %.0f ms",

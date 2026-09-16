@@ -77,3 +77,33 @@ examples:
 
   - query: "Which of Nordrhein-Westfalen and Niedersachsen lie within 100 km of Dortmund?"
     output: {operation: "BufferWithin", spatial: ["Dortmund", "Nordrhein-Westfalen", "Niedersachsen"], entity_type: "state", distance_km: 100}
+
+# Stage-3 examples for this category — the two shapes
+# agent1/retrieval/sql_generator.py's binary_operation()/intersects_buffer()
+# need once every named entity's own geometry has already been resolved
+# (through geometry_lookup.yaml's shapes) via ordinary SQL/PostGIS calls:
+# combining two already-known shapes (Union/Intersection/Difference/
+# SymDifference — the four ways operation names this category's own
+# extraction prompt above), and testing an already-known target shape
+# against a buffer around an already-known reference shape (BufferWithin's
+# named-candidate case — the open-ended case belongs to
+# spatial_relationship_buffer.yaml instead). Each request below names the
+# operation itself; four of these are the same SQL shape with only the
+# function name varying, so one cached statement per function name/entry.
+# See config/prompts/sql_generation.yaml for the shared rules.
+sql_generation:
+  examples:
+    - request: "The WKT text of the Union of two already-known geometries, each given as WKT text and its SRID. Use exactly :wkt_a and :srid_a for the first, exactly :wkt_b and :srid_b for the second. Alias the result column exactly as wkt."
+      output:
+        sql: "SELECT ST_AsText(ST_Union(ST_GeomFromText(:wkt_a, :srid_a), ST_GeomFromText(:wkt_b, :srid_b))) AS wkt"
+        params: {wkt_a: "POLYGON((...))", srid_a: 4326, wkt_b: "POLYGON((...))", srid_b: 4326}
+
+    - request: "The WKT text of the Difference of two already-known geometries (the first minus the second), each given as WKT text and its SRID. Use exactly :wkt_a and :srid_a for the first, exactly :wkt_b and :srid_b for the second. Alias the result column exactly as wkt."
+      output:
+        sql: "SELECT ST_AsText(ST_Difference(ST_GeomFromText(:wkt_a, :srid_a), ST_GeomFromText(:wkt_b, :srid_b))) AS wkt"
+        params: {wkt_a: "POLYGON((...))", srid_a: 4326, wkt_b: "POLYGON((...))", srid_b: 4326}
+
+    - request: "Whether an already-known target geometry intersects a buffer polygon (in metres) built around an already-known reference geometry, both given as WKT text and their own SRID. Use exactly :wkt_t and :srid_t for the target, exactly :wkt_ref and :srid_ref for the reference, and exactly :dist for the buffer distance in metres. Alias the result column exactly as meets_zone."
+      output:
+        sql: "SELECT ST_Intersects(ST_GeomFromText(:wkt_t, :srid_t), ST_Buffer(ST_GeomFromText(:wkt_ref, :srid_ref)::geography, :dist)::geometry) AS meets_zone"
+        params: {wkt_t: "POLYGON((...))", srid_t: 4326, wkt_ref: "POLYGON((...))", srid_ref: 4326, dist: 100000}
