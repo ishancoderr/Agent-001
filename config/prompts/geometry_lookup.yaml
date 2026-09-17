@@ -2,9 +2,17 @@
 #
 # Prompt-specific content only — see config/prompts/direct_lookup.yaml for
 # the convention this follows (attribute data deferred to
-# config/schema/attributes.yaml; state/city name blocks generated from the
+# config/schema/attributes.yaml; entity name blocks generated from the
 # gazetteer). This template carries no attributes at all, since a geometry
 # lookup returns shapes, not measured values.
+#
+# gazetteer: all (every enabled entity type in entities.yaml, not an
+# explicit [state, city] list) is correct here specifically because every
+# entity type declares its own geometry_column — unlike direct_lookup.yaml's
+# narrower `gazetteer: attributes` (not every entity has data to look up,
+# but every entity does have a shape) — so a new entity type appears here
+# with no prompt edit, the same "copy a block, no Python changes" promise
+# entities.yaml itself makes.
 #
 # entity_type_rules is a genuine YAML list rather than one folded paragraph,
 # since each bullet is an independent rule — a list loses nothing by being
@@ -20,7 +28,7 @@ query_type: GEOMETRY_LOOKUP
 
 sections: [intro, gazetteer, entity_type_rules, output_schema, output_notes, examples]
 
-gazetteer: [state, city]
+gazetteer: all
 entity_type_rules_intro: "ENTITY TYPE RULES:"
 
 intro: 'You are extracting the details of a GEOMETRY_LOOKUP query for a geospatial statistics
