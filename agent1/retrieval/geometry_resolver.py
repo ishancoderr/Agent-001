@@ -64,6 +64,17 @@ def resolve_geometries(
     Returns (found_list, still_missing_list). When `queries` is given, every
     SQL statement actually run against Agent-1's DB is appended to it, for
     evaluation-log tracing.
+
+    Used for a PEER's own ask (kqml_controller.py) — every slot here already
+    arrived as a real MissingGeometrySlot, which the peer could only have
+    constructed for an entity_type kqml_messaging.EntityType itself knows
+    about (city/state today), so requiring one here costs nothing. A
+    locally-initiated lookup that might name any of THIS agent's own entity
+    types (see resolve_entities() below) is a different situation: it must
+    not require a slot — and the Pydantic validation that comes with one —
+    just to check the local DB, since that fails immediately for an entity
+    type the wire protocol doesn't carry yet, even when nothing was ever
+    going to be sent over the wire.
     """
     found:   List[FoundGeometrySlot]   = []
     missing: List[MissingGeometrySlot] = []
@@ -87,6 +98,55 @@ def resolve_geometries(
             else:
                 log.info("       │ Geometry MISSING: %s (%s)", slot.spatial_entity, entity_type)
                 missing.append(slot)
+    finally:
+        db.close()
+
+    return found, missing
+
+
+def resolve_entities(
+    entities: List[Dict[str, str]],
+    queries: Optional[List[str]] = None,
+) -> Tuple[List[Dict[str, object]], List[Dict[str, str]]]:
+    """Like resolve_geometries(), for a user's own GEOMETRY_LOOKUP request
+    (query_controller.py's _handle_geometry()) rather than a peer's ask.
+
+    Takes plain {"entity_name", "entity_type"} dicts — the shape
+    QueryParams.entities already carries — instead of requiring a real
+    MissingGeometrySlot per entity up front. Constructing one Pydantic-
+    validates entity_type against kqml_messaging.EntityType, which restricts
+    it to city/state; requiring that just to check whether THIS agent
+    already holds an entity locally would make every lookup for any other
+    of entities.yaml's own types (e.g. river) fail before the local DB was
+    ever consulted, even when the answer was sitting right there. That
+    validation only has to happen for an entity actually being sent to the
+    peer — query_controller.py does it itself, per entity, only for what
+    comes back in `missing` here, so one entity type the wire protocol
+    doesn't know yet never takes the rest of the request down with it.
+
+    Returns (found, missing): found is
+    [{"entity_name", "entity_type", "wkt", "srid"}, ...] (plain dicts, not
+    FoundGeometrySlot, for the same reason); missing is the subset of
+    `entities` not found here, unchanged."""
+    found:   List[Dict[str, object]] = []
+    missing: List[Dict[str, str]]    = []
+
+    db = SessionLocal()
+    try:
+        for entity in entities:
+            entity_name, entity_type = entity["entity_name"], entity["entity_type"]
+            wkt, matched_name, _exists = _lookup(entity_name, entity_type, db, queries=queries)
+            if wkt is not None:
+                log.info("       │ Geometry FOUND : %s → %s (%s)", entity_name, matched_name, entity_type)
+                found.append({
+                    "entity_name": matched_name,   # actual DB name
+                    "entity_type": entity_type,
+                    "wkt":         wkt,
+                    "srid":        4326,
+                })
+            else:
+                log.info("       │ Geometry MISSING: %s (%s)", entity_name, entity_type)
+                missing.append(entity)
     finally:
         db.close()
 

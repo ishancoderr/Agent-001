@@ -11,18 +11,19 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ..pipeline import run as run_pipeline
 from ..pipeline.gazetteer import normalize_entity_name
+from ..pipeline.query_params import DEFAULT_ENTITY_TYPE, system_capabilities_description
 from ..retrieval import answer_query
 from ..retrieval.geometry_resolver import (
-    resolve_geometries, build_city_buffer, buffer_from_point, cities_within_buffer,
+    resolve_entities, build_city_buffer, buffer_from_point, cities_within_buffer,
     resolve_named_geometry, execute_operation, fold_union, targets_within_buffer,
 )
 from ..messaging.kqml_geometry_client import send_kqml_geometry_ask, send_kqml_city_buffer_ask
 from ..evaluation import log_evaluation_metrics
-from kqml_messaging import MessageFactory, response_status
+from kqml_messaging import MessageFactory, MissingGeometrySlot, response_status
 
 log = logging.getLogger("agent1.controller.query")
 router = APIRouter()
@@ -45,6 +46,14 @@ class QueryInfo(BaseModel):
     spatial: List[str]
     temporal: List[int]
     attributes: List[str]
+    # Which entities.yaml entity type the rows in `data` are about — a
+    # DIRECT_LOOKUP row's own field is still literally named "state" for
+    # every entity type (merger.py/DataRecord predate multi-entity support,
+    # and renaming that field is a separate, larger wire-contract change),
+    # so a client needs this to know to label the column "river" instead of
+    # "state" for a river query rather than showing a state-only heading
+    # for every entity type.
+    entity_type: str
 
 
 class DataGroups(BaseModel):
@@ -364,6 +373,7 @@ def handle_query(body: UserQuery):
             spatial=params.spatial,
             temporal=params.temporal,
             attributes=params.attributes,
+            entity_type=params.entity_type or DEFAULT_ENTITY_TYPE,
         ),
         data=DataGroups(
             complete=complete_rows,
@@ -445,12 +455,7 @@ def _handle_unrelated(params, raw_query: str, request_id: str, timestamp: str, t
     return {
         "request_id": request_id,
         "status":     "rejected",
-        "message": (
-            "This system only answers questions about German federal states and "
-            "cities: demographic data (population, marriages, live births), "
-            "geometry/shape, and spatial relationships or operations between them. "
-            "Your question doesn't fit any of those categories."
-        ),
+        "message": system_capabilities_description(),
         "query": {"raw": raw_query, "type": "UNRELATED"},
         "performance": {
             "phase1_ms": round(total_ms, 1),
@@ -540,31 +545,47 @@ def _handle_geometry(params, raw_query: str, request_id: str,
                                 "tokens":{"agent_1":tokens_agent1,"agent_2":0,"total":tokens_agent1}}}
     log.info("GEOM   │ Resolving %d entity/entities: %s", len(entities), entities)
 
-    # Build slots for all requested entities
-    slots = [
-        MessageFactory.missing_geometry_slot(
-            spatial_entity=e["entity_name"],
-            entity_type=e["entity_type"],
-        )
-        for e in entities
-    ]
-
-    # Try local DB first
+    # Check the local DB first — using the plain {"entity_name",
+    # "entity_type"} dicts extraction already produced, not a
+    # MissingGeometrySlot built for every entity up front. Building one
+    # Pydantic-validates entity_type against kqml_messaging.EntityType
+    # (city/state only), which would fail immediately for any other of
+    # entities.yaml's own types (e.g. river) even when this agent already
+    # holds it locally and Agent-2 was never going to be asked at all.
     sql_queries: List[str] = []
-    found_local, still_missing = resolve_geometries(slots, queries=sql_queries)
-    local_names = {fg.spatial_entity for fg in found_local}
+    found_local, still_missing = resolve_entities(entities, queries=sql_queries)
+    local_names = {fg["entity_name"] for fg in found_local}
 
     t1 = time.perf_counter()
+
+    # Only entities genuinely absent locally are ever turned into a real
+    # MissingGeometrySlot — the one place that validation actually needs to
+    # happen, since it's the one place an entity_type has to travel over
+    # the wire. An entity_type the KQML protocol doesn't carry yet (again,
+    # river) can't be asked for; it's logged and left "not_found" rather
+    # than taking the rest of the request down with it.
+    remote_askable: List[MissingGeometrySlot] = []
+    for m in still_missing:
+        try:
+            remote_askable.append(MessageFactory.missing_geometry_slot(
+                spatial_entity=m["entity_name"], entity_type=m["entity_type"],
+            ))
+        except (ValueError, ValidationError) as exc:
+            log.warning(
+                "GEOM   │ %r has entity_type=%r, which the KQML protocol doesn't "
+                "carry yet — cannot ask Agent-2 for it: %s",
+                m["entity_name"], m["entity_type"], exc,
+            )
 
     # Ask Agent-2 for anything not found locally
     found_remote = []
     kqml_turns   = 0
     tokens_agent2 = 0
     kqml_exchanges: List[Dict] = []
-    if still_missing:
-        log.info("GEOM   │ %d missing locally — asking Agent-2 ...", len(still_missing))
+    if remote_askable:
+        log.info("GEOM   │ %d missing locally — asking Agent-2 ...", len(remote_askable))
         try:
-            resp          = send_kqml_geometry_ask(still_missing)
+            resp          = send_kqml_geometry_ask(remote_askable)
             found_remote  = resp.get("found", [])
             kqml_turns    = 1
             if "ask_message" in resp and "tell_message" in resp:
@@ -575,12 +596,23 @@ def _handle_geometry(params, raw_query: str, request_id: str,
 
     t2 = time.perf_counter()
 
-    # Index found geometries by spatial_entity name (case-insensitive)
-    local_index  = {fg.spatial_entity.lower(): fg for fg in found_local}
-    remote_index = {fg.spatial_entity.lower(): fg for fg in found_remote}
+    # Index found geometries by name (case-insensitive) — both as the same
+    # plain-dict shape, found_local already is one and found_remote (real
+    # FoundGeometrySlot objects the shared library validated on the way
+    # back from Agent-2) is normalized to match, so _find_result()/the
+    # result-list build below never need to care which side an answer
+    # came from.
+    local_index  = {fg["entity_name"].lower(): fg for fg in found_local}
+    remote_index = {
+        fg.spatial_entity.lower(): {
+            "entity_name": fg.spatial_entity, "entity_type": fg.entity_type.value,
+            "wkt": fg.geometry, "srid": fg.srid,
+        }
+        for fg in found_remote
+    }
 
     def _find_result(requested_name: str):
-        """Return (FoundGeometrySlot, source) or (None, 'not_found')."""
+        """Return (result dict, source) or (None, 'not_found')."""
         # The gazetteer supplies the database's own spelling; the name as asked
         # for is kept as a fallback in case the reply used that form.
         variants = list(dict.fromkeys(filter(None, [
@@ -601,10 +633,10 @@ def _handle_geometry(params, raw_query: str, request_id: str,
         fg, source = _find_result(e["entity_name"])
         if fg is not None:
             geometries.append({
-                "entity_name": fg.spatial_entity,
-                "entity_type": fg.entity_type,
-                "wkt":         fg.geometry,
-                "srid":        fg.srid,
+                "entity_name": fg["entity_name"],
+                "entity_type": fg["entity_type"],
+                "wkt":         fg["wkt"],
+                "srid":        fg["srid"],
                 "source":      source,
             })
         else:
@@ -646,7 +678,7 @@ def _handle_geometry(params, raw_query: str, request_id: str,
         "local_resolution": {
             "entities_requested": [e["entity_name"] for e in entities],
             "found_locally":      sorted(local_names),
-            "still_missing_after_local_db": [m.spatial_entity for m in still_missing],
+            "still_missing_after_local_db": [m["entity_name"] for m in still_missing],
             "sql_queries":        sql_queries,
         },
         "kqml_exchanges":    kqml_exchanges,
@@ -721,7 +753,7 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
     then runs the operation locally — the operation itself is never missing
     (Section 3.5), only an input can be."""
     operation   = params.operation
-    entity_type = params.entity_type or "state"
+    entity_type = params.entity_type or DEFAULT_ENTITY_TYPE
     names       = params.spatial or []
 
     if not operation or len(names) < 2:

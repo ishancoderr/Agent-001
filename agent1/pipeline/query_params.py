@@ -80,6 +80,40 @@ def default_attribute_for(entity_type: str) -> str:
     )
 
 
+def _joined(items: List[str]) -> str:
+    """"a, b and c" — plain English list joining, used only by
+    system_capabilities_description() below."""
+    if len(items) <= 1:
+        return items[0] if items else ""
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def system_capabilities_description() -> str:
+    """A plain-English description of what this system can answer, built
+    from entities.yaml + attributes.yaml — the message shown to a user
+    whose question was classified UNRELATED (see query_controller.py's
+    _handle_unrelated()). Generated, not a second hand-written copy of the
+    same entity/attribute list: a hardcoded copy here went stale the moment
+    a new entity type was added to entities.yaml but not to this string,
+    telling a user asking a legitimate question that the system couldn't
+    answer it."""
+    entity_labels = [spec["label_plural"] for spec in _ENTITIES.values() if spec.get("enabled", True)]
+    attr_labels: List[str] = []
+    seen = set()
+    for table in _ATTRIBUTE_TABLES:
+        for canonical, spec in table["columns"].items():
+            label = spec.get("label", canonical)
+            if label not in seen:
+                seen.add(label)
+                attr_labels.append(label)
+    return (
+        f"This system only answers questions about German {_joined(entity_labels)}: "
+        f"data ({_joined(attr_labels)}), geometry/shape, and spatial relationships "
+        f"or operations between them. Your question doesn't fit any of those "
+        f"categories."
+    )
+
+
 @dataclass
 class SpatialRelationship:
     """A relationship question: which kind, and between what.
