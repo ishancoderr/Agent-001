@@ -66,6 +66,11 @@ class GapSlot:
     spatial: List[str]
     temporal: List[int]
     attributes: List[str]
+    # Which entities.yaml entity type `spatial` names (e.g. "state", "river").
+    # Carried on the wire now via kqml_messaging.MissingSlot's own entity_type
+    # field, so the peer knows which table to look in instead of guessing —
+    # see answer_query()/lookup_slots() below for where each side reads it.
+    entity_type: str = ""
 
 
 @dataclass
@@ -141,14 +146,14 @@ class LocalStore:
                 log.info("       | No local states to query - skipping main lookup")
                 return LocalResult(
                     found=[],
-                    gaps=[GapSlot(spatial=spatial_gap, temporal=years, attributes=attributes)],
+                    gaps=[GapSlot(spatial=spatial_gap, temporal=years, attributes=attributes, entity_type=entity_type)],
                     queries=queries,
                 )
 
             by_slot = self.fetch_demographics(db, local_states, years, attributes, queries, entity_type)
             return LocalResult(
                 found=self.collect_found(local_states, years, attributes, by_slot),
-                gaps=self.classify_gaps(local_states, years, attributes, by_slot, spatial_gap),
+                gaps=self.classify_gaps(local_states, years, attributes, by_slot, spatial_gap, entity_type),
                 queries=queries,
             )
         finally:
@@ -210,7 +215,7 @@ class LocalStore:
         return found
 
     @staticmethod
-    def classify_gaps(states, years, attributes, by_slot, spatial_gap) -> List[GapSlot]:
+    def classify_gaps(states, years, attributes, by_slot, spatial_gap, entity_type: str) -> List[GapSlot]:
         """Group what is missing into as few request blocks as possible.
 
         Entries combine only when the block they describe is the same shape:
@@ -234,12 +239,12 @@ class LocalStore:
                     log.info("       | ATTR GAP     : %s year=%d (NULL: %s)", state, year, missing)
                     attribute_gaps.setdefault((state, tuple(missing)), []).append(year)
 
-        gaps = [GapSlot(spatial=[state], temporal=years_missing, attributes=list(attrs))
+        gaps = [GapSlot(spatial=[state], temporal=years_missing, attributes=list(attrs), entity_type=entity_type)
                 for (state, attrs), years_missing in attribute_gaps.items()]
-        gaps += [GapSlot(spatial=[state], temporal=years_missing, attributes=attributes)
+        gaps += [GapSlot(spatial=[state], temporal=years_missing, attributes=attributes, entity_type=entity_type)
                  for state, years_missing in temporal_gaps.items()]
         if spatial_gap:
-            gaps.append(GapSlot(spatial=spatial_gap, temporal=years, attributes=attributes))
+            gaps.append(GapSlot(spatial=spatial_gap, temporal=years, attributes=attributes, entity_type=entity_type))
 
         log.info("       | Summary: attr_gaps=%d  temp_gaps=%d  spatial_gaps=%d",
                  len(attribute_gaps), len(temporal_gaps), len(spatial_gap))
@@ -255,20 +260,19 @@ class LocalStore:
         years = slot.temporal
         attributes = slot.attributes
 
+        # `slot` arrives as kqml_messaging's MissingSlot, whose entity_type
+        # field the asking peer set to its own params.entity_type (see
+        # answer_query() below) — read it the same way lookup() reads its
+        # own params.entity_type, falling back to the same config default
+        # only for a slot old enough to predate this field (entity_type
+        # defaults to None on the wire, same as here).
+        entity_type = getattr(slot, "entity_type", None) or DEFAULT_ENTITY_TYPE
+
         queries: List[str] = []
         db = SessionLocal()
         try:
-            # Unlike lookup() above, there is no params.entity_type to read
-            # here at all: `slot` arrives as kqml_messaging's MissingSlot,
-            # the shared cross-agent wire format, which has no entity_type
-            # field — the KQML protocol itself, not just this file, is
-            # state-only today. Adding one would be a kqml_messaging change
-            # both agents need to agree on, not something local to this
-            # file, so this still falls back to the same config default
-            # lookup() uses rather than pretending a value arrived that
-            # didn't.
             rows = self._run(
-                db, self._generator.demographics(states, years, attributes, DEFAULT_ENTITY_TYPE), queries
+                db, self._generator.demographics(states, years, attributes, entity_type), queries
             ).fetchall()
 
             found, satisfied = [], set()
