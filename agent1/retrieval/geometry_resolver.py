@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy import text
 
-from kqml_messaging import MissingGeometrySlot, FoundGeometrySlot, MessageFactory, check_srid_agreement
+from kqml_messaging import EntityType, MissingGeometrySlot, FoundGeometrySlot, MessageFactory, check_srid_agreement
 
 from ..database import SessionLocal
 from ..pipeline.gazetteer import normalize_entity_name
@@ -66,12 +66,15 @@ def resolve_geometries(
     evaluation-log tracing.
 
     Used for a PEER's own ask (kqml_controller.py) — every slot here already
-    arrived as a real MissingGeometrySlot, already Pydantic-validated by the
-    shared library on the way in, so requiring one here costs nothing more.
-    A locally-initiated lookup (see resolve_entities() below) is a different
-    situation: it must not require building one of these — and paying for
-    Pydantic construction — just to check the local DB, when a plain dict is
-    all a local lookup ever needed in the first place.
+    arrived as a real MissingGeometrySlot, which the peer could only have
+    constructed for an entity_type kqml_messaging.EntityType itself knows
+    about (city/state today), so requiring one here costs nothing. A
+    locally-initiated lookup that might name any of THIS agent's own entity
+    types (see resolve_entities() below) is a different situation: it must
+    not require a slot — and the Pydantic validation that comes with one —
+    just to check the local DB, since that fails immediately for an entity
+    type the wire protocol doesn't carry yet, even when nothing was ever
+    going to be sent over the wire.
     """
     found:   List[FoundGeometrySlot]   = []
     missing: List[MissingGeometrySlot] = []
@@ -79,7 +82,7 @@ def resolve_geometries(
     db = SessionLocal()
     try:
         for slot in slots:
-            entity_type = slot.entity_type  # already a plain str
+            entity_type = slot.entity_type.value  # plain str, not the EntityType repr, for logging
             wkt, matched_name, _exists = _lookup(slot.spatial_entity, entity_type, db, queries=queries)
             if wkt is not None:
                 log.info("       │ Geometry FOUND : %s → %s (%s)",
@@ -110,14 +113,16 @@ def resolve_entities(
 
     Takes plain {"entity_name", "entity_type"} dicts — the shape
     QueryParams.entities already carries — instead of requiring a real
-    MissingGeometrySlot per entity up front. entity_type is a plain string
-    now (kqml_messaging.MissingGeometrySlot.entity_type is no longer
-    restricted to a fixed enum), so this isn't about avoiding a validation
-    failure any more — it's about not paying for building and Pydantic-
-    validating a wire-protocol object just to check the local DB, when
-    nothing here is ever going to cross the wire unless the entity turns
-    out to be genuinely missing. query_controller.py builds a real slot
-    itself, per entity, only for what comes back in `missing` here.
+    MissingGeometrySlot per entity up front. Constructing one Pydantic-
+    validates entity_type against kqml_messaging.EntityType, which restricts
+    it to city/state; requiring that just to check whether THIS agent
+    already holds an entity locally would make every lookup for any other
+    of entities.yaml's own types (e.g. river) fail before the local DB was
+    ever consulted, even when the answer was sitting right there. That
+    validation only has to happen for an entity actually being sent to the
+    peer — query_controller.py does it itself, per entity, only for what
+    comes back in `missing` here, so one entity type the wire protocol
+    doesn't know yet never takes the rest of the request down with it.
 
     Returns (found, missing): found is
     [{"entity_name", "entity_type", "wkt", "srid"}, ...] (plain dicts, not
@@ -261,7 +266,7 @@ def cities_within_buffer(
         return [
             MessageFactory.found_geometry_slot(
                 spatial_entity=r._mapping[ENTITY_ALIAS],
-                entity_type="city",
+                entity_type=EntityType.CITY,
                 geometry=r._mapping[WKT_ALIAS],
                 srid=r._mapping[SRID_ALIAS] or srid,
             )

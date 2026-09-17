@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 
 import httpx
 
-from kqml_messaging import MissingGeometrySlot, FoundGeometrySlot, MessageFactory
+from kqml_messaging import EntityType, MissingGeometrySlot, FoundGeometrySlot, MessageFactory
 from kqml_messaging.serializers import JSONSerializer
 
 from .agent_registry import AGENT_REGISTRY
@@ -48,10 +48,10 @@ def send_kqml_geometry_ask(
 
     for fg in found:
         log.info("       │ Geometry received : %s (%s) srid=%s  wkt=%.60s…",
-                 fg.spatial_entity, fg.entity_type, fg.srid, fg.geometry)
+                 fg.spatial_entity, fg.entity_type.value, fg.srid, fg.geometry)
     if missing:
         log.info("       │ Still missing geometries: %s",
-                 [(m.spatial_entity, m.entity_type) for m in missing])
+                 [(m.spatial_entity, m.entity_type.value) for m in missing])
 
     return {"found": found, "missing": missing, "ask_message": payload, "tell_message": tell_payload}
 
@@ -63,7 +63,7 @@ def send_kqml_city_buffer_ask(wkt: str, srid: int, exclude: List[str]) -> Dict[s
     be named in advance. Returns {"found": List[FoundGeometrySlot]}.
     """
     sq = MessageFactory.spatial_query(
-        topic="Within", geometry=wkt, target_entity="city", srid=srid, exclude=exclude,
+        topic="Within", geometry=wkt, target_entity=EntityType.CITY, srid=srid, exclude=exclude,
     )
     msg = MessageFactory.ask_spatial_query(sender="Agent-1", receiver="Agent-2", spatial_query=sq)
     payload = JSONSerializer.to_dict(msg)

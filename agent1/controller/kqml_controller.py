@@ -62,11 +62,10 @@ def receive_kqml(msg: KQMLMessage):
 
         if result["found"]:
             found_slots.append({
-                "spatial":     slot.spatial,
-                "temporal":    slot.temporal,
-                "attributes":  slot.attributes,
-                "data":        result["found"],
-                "entity_type": slot.entity_type,
+                "spatial":    slot.spatial,
+                "temporal":   slot.temporal,
+                "attributes": slot.attributes,
+                "data":       result["found"],
             })
         # Group states by their actual residue years (not the original requested
         # range) so the peer only re-asks a third agent for what is genuinely
@@ -76,10 +75,9 @@ def receive_kqml(msg: KQMLMessage):
             by_years.setdefault(tuple(years), []).append(state)
         for years, states in by_years.items():
             missing_slots.append({
-                "spatial":     states if len(states) > 1 else states[0],
-                "temporal":    list(years),
-                "attributes":  slot.attributes,
-                "entity_type": slot.entity_type,
+                "spatial":    states if len(states) > 1 else states[0],
+                "temporal":   list(years),
+                "attributes": slot.attributes,
             })
 
     # ── Geometry slots (scenarios 11-13) ──────────────────────────────────────

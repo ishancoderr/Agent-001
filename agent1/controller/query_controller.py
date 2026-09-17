@@ -605,7 +605,7 @@ def _handle_geometry(params, raw_query: str, request_id: str,
     local_index  = {fg["entity_name"].lower(): fg for fg in found_local}
     remote_index = {
         fg.spatial_entity.lower(): {
-            "entity_name": fg.spatial_entity, "entity_type": fg.entity_type,
+            "entity_name": fg.spatial_entity, "entity_type": fg.entity_type.value,
             "wkt": fg.geometry, "srid": fg.srid,
         }
         for fg in found_remote
