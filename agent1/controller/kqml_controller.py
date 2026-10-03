@@ -1,7 +1,11 @@
 """
 POST /kqml/receive  — handles incoming KQML 'ask' messages from peer agents
                       (supports bidirectional Agent-2 → Agent-1 queries,
-                       including geometry-exchange scenarios 11-13)
+                       including geometry-exchange scenarios 9-12 and the
+                       delegated zone test of scenario 20)
+
+Every answer comes from the same SqlWriter fetches the /query path uses —
+this side only answers; it never asks a third agent.
 """
 from __future__ import annotations
 
@@ -13,8 +17,8 @@ from pydantic import BaseModel
 
 from kqml_messaging import MissingSlot, MissingGeometrySlot
 
-from ..retrieval import execute_local_lookup_from_slots
-from ..retrieval.geometry_resolver import resolve_geometries, cities_within_buffer
+from ..retrieval.gap_detector import lookup_for_peer, shapes_for_peer
+from ..retrieval.spatial_compute import zone_for_peer
 
 log = logging.getLogger("agent1.controller.kqml")
 router = APIRouter()
@@ -56,7 +60,7 @@ def receive_kqml(msg: KQMLMessage):
         log.info("       │ Data slot %d: spatial=%s  temporal=%s  attrs=%s",
                  i, slot.spatial, slot.temporal, slot.attributes)
 
-        result = execute_local_lookup_from_slots(slot)
+        result = lookup_for_peer(slot)
         log.info("       │   → found=%d  missing=%s",
                  len(result["found"]), result["missing"] or "none")
 
@@ -82,28 +86,15 @@ def receive_kqml(msg: KQMLMessage):
                 "entity_type": slot.entity_type,
             })
 
-    # ── Geometry slots (scenarios 11-13) ──────────────────────────────────────
+    # ── Geometry slots (scenarios 9-12) ───────────────────────────────────────
     found_geometries:   List[Dict] = []
     missing_geometries: List[Dict] = []
 
     if raw_geometry_slots:
         geo_slot_objs = [MissingGeometrySlot(**g) for g in raw_geometry_slots]
-        resolved, unresolved = resolve_geometries(geo_slot_objs)
+        found_geometries, missing_geometries = shapes_for_peer(geo_slot_objs)
 
-        for fg in resolved:
-            found_geometries.append({
-                "spatial_entity": fg.spatial_entity,
-                "entity_type":    fg.entity_type,
-                "geometry":       fg.geometry,
-                "srid":           fg.srid,
-            })
-        for mg in unresolved:
-            missing_geometries.append({
-                "spatial_entity": mg.spatial_entity,
-                "entity_type":    mg.entity_type,
-            })
-
-    # ── Spatial query (Scenario 21: buffer-and-test) ──────────────────────────
+    # ── Spatial query (Scenario 20: delegated zone test) ──────────────────────
     # The peer sends a constructed shape because the targets that satisfy it
     # cannot be named in advance; test it against our OWN catalogue rather than
     # looking anything up by name.
@@ -116,13 +107,8 @@ def receive_kqml(msg: KQMLMessage):
         log.info("       │ Spatial query: topic=%s target=%s exclude=%d",
                  raw_spatial_query.get("topic"), target, len(exclude))
         if target == "city":
-            city_matches = cities_within_buffer(wkt, srid, exclude)
-            found_geometries.extend({
-                "spatial_entity": fg.spatial_entity,
-                "entity_type":    fg.entity_type,
-                "geometry":       fg.geometry,
-                "srid":           fg.srid,
-            } for fg in city_matches)
+            city_matches = zone_for_peer(wkt, srid, exclude)
+            found_geometries.extend(city_matches)
             log.info("       │ Spatial query matches in our catalogue: %d", len(city_matches))
 
     log.info("KQML   │ Reply: found_slots=%d  missing_slots=%d  "

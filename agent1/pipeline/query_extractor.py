@@ -23,7 +23,7 @@ log = logging.getLogger("agent1.pipeline.extractor")
 # Overridable per deployment via .env (see agent1/.env.example) — same
 # os.getenv(NAME, default) convention as DB_HOST etc. in database.py. A
 # single request can further override this via UserQuery.model, threaded
-# through parse_query() -> QueryExtractor(model=...); this env var only sets
+# through pipeline_main.run() -> QueryExtractor(model=...); this env var only sets
 # what's used when a request doesn't ask for a specific model.
 EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "gpt-4o-mini")
 MAX_TOKENS = 600      # an "all states" geometry answer needs the room
@@ -43,7 +43,7 @@ class QueryExtractor:
 
         `query_type` reaches here already validated by QueryClassifier — it's
         always one of VALID_QUERY_TYPES, and UNRELATED never reaches
-        extraction (parse_query()/pipeline_main.run() short-circuit on it
+        extraction (pipeline_main.run() short-circuits on it
         first) — so every value here should already have a real template.
         If one doesn't, that's a real bug (a category with no matching
         config/prompts/*.yaml file), and guessing DIRECT_LOOKUP's prompt

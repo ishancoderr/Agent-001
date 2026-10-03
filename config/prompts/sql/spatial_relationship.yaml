@@ -1,0 +1,60 @@
+# SqlWriter prompt for SPATIAL_ADJACENCY / SPATIAL_DIRECTION / SPATIAL_DISTANCE
+# (Scenarios 17-19) — see agent1/retrieval/sql_writer.py.
+#
+# Runs only after every shape it needs is present: the candidate states and
+# the reference shape, fetched locally or supplied by Agent-2. The relationship
+# itself is evaluated here at Agent-1 (Section 4).
+#
+# Definitions used (Scenario 18 states them because the standard does not):
+#   adjacency   the shapes intersect and are not the same shape
+#   north_of    bearing from the reference centroid to the candidate centroid
+#               is between 315 and 360 or between 0 and 45 degrees
+#   east_of     45 to 135      south_of  135 to 225      west_of  225 to 315
+#   distance    the candidate shape is within :dist_m metres of the reference,
+#               measured on geography (metres, not degrees)
+
+version: 1
+
+steps:
+
+  compute:
+    task: 'Return the candidates for which the requested relationship holds
+      with the reference shape. The relationship is in spatial_relationship.type:
+      "adjacency" = ST_Intersects(candidate, reference) AND NOT
+      ST_Equals(candidate, reference); "north_of" / "south_of" / "east_of" /
+      "west_of" = degrees(ST_Azimuth(ST_Centroid(reference), ST_Centroid(candidate)))
+      in the sector north 315-360 or 0-45, east 45-135, south 135-225,
+      west 225-315, ordered by that bearing; "distance" =
+      ST_DWithin(candidate::geography, reference::geography, :dist_m), ordered
+      by ST_Distance on geography. Never return the reference itself (exclude
+      the name :ref). Turn :names and :wkts into rows with unnest(), and build
+      the reference with ST_GeomFromText(:ref_wkt, :ref_srid).'
+
+    placeholders:
+      names:    'text[] — candidate state names, parallel to :wkts'
+      wkts:     'text[] — candidate state WKT (SRID 4326), parallel to :names'
+      ref:      'text — the reference name, never returned'
+      ref_wkt:  'text — WKT of the reference shape'
+      ref_srid: 'int — SRID of the reference shape'
+      dist_m:   'float — distance in metres (only used for "distance")'
+
+    columns: 'entity_name only.'
+
+    examples:
+      - input:
+          question: "Which states border Thueringen?"
+          spatial_relationship: {type: adjacency, refs: ["Thüringen"]}
+        output:
+          sql: "WITH cand(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(n, w)), ref(shape) AS (SELECT ST_GeomFromText(:ref_wkt, :ref_srid)) SELECT cand.entity_name AS entity_name FROM cand, ref WHERE cand.entity_name <> :ref AND ST_Intersects(cand.shape, ref.shape) AND NOT ST_Equals(cand.shape, ref.shape)"
+
+      - input:
+          question: "Which states lie west of Berlin?"
+          spatial_relationship: {type: west_of, refs: ["Berlin"]}
+        output:
+          sql: "WITH cand(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(n, w)), ref(shape) AS (SELECT ST_GeomFromText(:ref_wkt, :ref_srid)), bearing(entity_name, az) AS (SELECT cand.entity_name, degrees(ST_Azimuth(ST_Centroid(ref.shape), ST_Centroid(cand.shape))) FROM cand, ref WHERE cand.entity_name <> :ref) SELECT bearing.entity_name AS entity_name FROM bearing WHERE bearing.az >= 225 AND bearing.az <= 315 ORDER BY bearing.az"
+
+      - input:
+          question: "Which states are within 150 km of Hamburg?"
+          spatial_relationship: {type: distance, refs: ["Hamburg"], distance_km: 150}
+        output:
+          sql: "WITH cand(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(n, w)), ref(shape) AS (SELECT ST_GeomFromText(:ref_wkt, :ref_srid)) SELECT cand.entity_name AS entity_name FROM cand, ref WHERE cand.entity_name <> :ref AND ST_DWithin(cand.shape::geography, ref.shape::geography, :dist_m) ORDER BY ST_Distance(cand.shape::geography, ref.shape::geography)"

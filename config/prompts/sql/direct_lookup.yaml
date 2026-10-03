@@ -1,0 +1,84 @@
+# SqlWriter prompt for DIRECT_LOOKUP — see agent1/retrieval/sql_writer.py.
+#
+# The model receives the user's question and the extracted parameters as
+# JSON, and writes ONE SELECT that fetches those values from this agent's own
+# database. The VALUES themselves are never written by the model: Python
+# binds them to the placeholders listed under `placeholders`, so the model
+# cannot drop, add or change a state or a year.
+#
+# The shared intro and safety rules come from config/prompts/sql/rules.yaml;
+# only what is specific to this category lives here.
+#
+# Steps (see agent1/retrieval/gap_detector.py):
+#   fetch     the requested values (Scenarios 1-8, and Agent-2's data asks)
+#   presence  which places have any row at all, in any year — run only for
+#             places that returned no row, to tell a spatial gap (no row in
+#             any year) from a temporal gap (rows exist, not for these years)
+
+version: 1
+
+steps:
+
+  fetch:
+    task: 'Fetch the requested attribute values for the requested places and
+      years from this agent''s own tables. Return one row per place per year
+      that exists here. Do not compute any spatial relationship: the places to
+      use are exactly :names, already resolved; the question is context only.'
+
+    placeholders:
+      names: 'text[] — the place names to fetch (compare with = ANY(:names))'
+      years: 'int[] — the years to fetch (compare with = ANY(:years))'
+
+    # The gap detector reads the result by these names. Wrong or missing
+    # aliases mean the values cannot be read, so they are checked after the
+    # query runs (see SqlWriter.check_columns()).
+    columns: 'entity_name (the place name), year (the period column), then
+      every requested attribute aliased by its own name, in the order given.
+      Order the rows by entity_name, then year.'
+
+    examples:
+      - input:
+          question: "How many people lived in Bayern and Sachsen in 2021?"
+          entity_type: state
+          spatial: ["Bayern", "Sachsen"]
+          temporal: [2021]
+          attributes: ["population"]
+        output:
+          sql: "SELECT s.state_name AS entity_name, sd.stat_year AS year, sd.population AS population FROM state_demographics sd JOIN states s ON s.state_id = sd.state_id WHERE s.state_name = ANY(:names) AND sd.stat_year = ANY(:years) ORDER BY s.state_name, sd.stat_year"
+
+      - input:
+          question: "Give me the marriage and live birth figures for Saarland from 2018 to 2020."
+          entity_type: state
+          spatial: ["Saarland"]
+          temporal: [2018, 2019, 2020]
+          attributes: ["marriages", "live_births"]
+        output:
+          sql: "SELECT s.state_name AS entity_name, sd.stat_year AS year, sd.marriages AS marriages, sd.live_births AS live_births FROM state_demographics sd JOIN states s ON s.state_id = sd.state_id WHERE s.state_name = ANY(:names) AND sd.stat_year = ANY(:years) ORDER BY s.state_name, sd.stat_year"
+
+      - input:
+          question: "What was the population in 2021 of the states that border Thueringen?"
+          entity_type: state
+          spatial: ["Bayern", "Hessen", "Niedersachsen", "Sachsen", "Sachsen-Anhalt"]
+          temporal: [2021]
+          attributes: ["population"]
+        output:
+          sql: "SELECT s.state_name AS entity_name, sd.stat_year AS year, sd.population AS population FROM state_demographics sd JOIN states s ON s.state_id = sd.state_id WHERE s.state_name = ANY(:names) AND sd.stat_year = ANY(:years) ORDER BY s.state_name, sd.stat_year"
+
+  presence:
+    task: 'Return which of the given place names have at least one row in the
+      attribute table, in any year and whatever its values are. Do not filter
+      by year.'
+
+    placeholders:
+      names: 'text[] — the place names to check (compare with = ANY(:names))'
+
+    columns: 'entity_name only, one row per place that has any row. Use
+      SELECT DISTINCT.'
+
+    examples:
+      - input:
+          question: "Population of Bayern and Hamburg in 2021"
+          entity_type: state
+          spatial: ["Bayern", "Hamburg"]
+        output:
+          sql: "SELECT DISTINCT s.state_name AS entity_name FROM state_demographics sd JOIN states s ON s.state_id = sd.state_id WHERE s.state_name = ANY(:names)"

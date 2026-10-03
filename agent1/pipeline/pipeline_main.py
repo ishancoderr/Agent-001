@@ -1,18 +1,15 @@
 """
 Pipeline entry point — constructs each pipeline class and calls its method,
-in order: CleanQuery -> QueryClassifier -> QueryExtractor -> QueryParamsBuilder
--> validate_spatial. query_controller.py's /query endpoint calls run() here
-directly instead of sequencing these calls itself.
+in order: CleanQuery -> QueryClassifier -> QueryExtractor -> QueryParamsBuilder.
+query_controller.py's /query endpoint calls run() here directly instead of
+sequencing these calls itself.
 
-QueryParamsBuilder is the same class parse_query() uses internally; it's
-constructed and called directly here so this file doesn't duplicate its
+This stage only UNDERSTANDS the question; it never touches the database.
+Everything after it — writing SQL, fetching, finding gaps, asking Agent-2 —
+happens in agent1/retrieval/.
+
+QueryParamsBuilder is constructed and called directly here so this file doesn't duplicate its
 per-category shaping logic and doesn't run classify()/extract() a second time.
-
-validate_spatial() only runs for DIRECT_LOOKUP and the three relationship
-types — the same categories query_controller.py used to gate it for itself —
-since it no-ops for DIRECT_LOOKUP anyway but has nothing at all to do for
-GEOMETRY_LOOKUP/SPATIAL_OPERATION/SPATIAL_RELATIONSHIP_BUFFER/NEEDS_YEAR, and
-those shouldn't pay for an unused DB round trip.
 """
 from __future__ import annotations
 
@@ -27,9 +24,8 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 from .query_classifier import QueryClassifier
 from .clean_query import CleanQuery
 from .query_extractor import QueryExtractor
-from .query_params import QueryParams, RELATIONSHIP_TYPES
+from .query_params import QueryParams
 from .query_parser import QueryParamsBuilder
-from .spatial_validator import validate_spatial
 
 
 def run(query: str, model: str | None = None) -> QueryParams:
@@ -57,8 +53,5 @@ def run(query: str, model: str | None = None) -> QueryParams:
         original_query=query, tokens_classify=tokens_classify, tokens_consumed=tokens_consumed,
         classify_model=classifier.model,
     )
-
-    if params.query_type == "DIRECT_LOOKUP" or params.query_type in RELATIONSHIP_TYPES:
-        params = validate_spatial(params)
 
     return params

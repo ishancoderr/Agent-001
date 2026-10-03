@@ -29,7 +29,7 @@ log = logging.getLogger("agent1.pipeline.classifier")
 # Overridable per deployment via .env (see agent1/.env.example) — same
 # os.getenv(NAME, default) convention as DB_HOST etc. in database.py. A
 # single request can further override this via UserQuery.model, threaded
-# through parse_query() -> QueryClassifier(model=...); this env var only sets
+# through pipeline_main.run() -> QueryClassifier(model=...); this env var only sets
 # what's used when a request doesn't ask for a specific model.
 CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", "gpt-4o-mini")
 

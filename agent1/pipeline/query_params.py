@@ -58,7 +58,7 @@ VALID_ENTITY_TYPES = {name for name, spec in _ENTITIES.items() if spec.get("enab
 # saying city or state). Reused here rather than a second, separately-typed
 # "state" fallback: DIRECT_LOOKUP's extraction prompt has no entity_type
 # field of its own yet (see config/prompts/direct_lookup.yaml), so
-# agent1/retrieval/local_store.py falls back to this exact same config value
+# agent1/retrieval/gap_detector.py falls back to this exact same config value
 # instead of a Python literal, for the same reason gazetteer.py does.
 DEFAULT_ENTITY_TYPE = _ENTITIES_DOC.get("ambiguous_name_default")
 

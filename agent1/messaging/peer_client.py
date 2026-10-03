@@ -27,7 +27,7 @@ from kqml_messaging import (FoundGeometrySlot, MessageFactory,
 from kqml_messaging.serializers import JSONSerializer
 
 from .agent_registry import AGENT_REGISTRY
-from ..retrieval.local_store import GapSlot
+from ..retrieval.gap_detector import GapSlot
 
 log = logging.getLogger("agent1.messaging.peer_client")
 

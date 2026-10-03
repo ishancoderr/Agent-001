@@ -1,0 +1,50 @@
+# SqlWriter prompt for SPATIAL_RELATIONSHIP_BUFFER (Scenario 20, query
+# delegation) — see agent1/retrieval/sql_writer.py.
+#
+# The cities that satisfy "within N km of X" are the answer, not the input, so
+# they cannot be named in a request. Agent-1 builds the zone once (step
+# "zone"), tests its own cities against it (step "within"), and sends the zone
+# itself to Agent-2, which runs the same "within" step on its own cities.
+
+version: 1
+
+steps:
+
+  zone:
+    task: 'Build a zone of :dist_m metres around the reference shape: cast it
+      to geography, ST_Buffer, cast back to geometry. Return it as WKT with
+      its SRID.'
+
+    placeholders:
+      ref_wkt:  'text — WKT of the reference shape (a city point)'
+      ref_srid: 'int — SRID of the reference shape'
+      dist_m:   'float — zone width in metres'
+
+    columns: 'wkt (ST_AsText of the zone), srid.'
+
+    examples:
+      - input:
+          question: "Which cities lie within 100 km of Dortmund?"
+          spatial: ["Dortmund"]
+          distance_km: 100
+        output:
+          sql: "SELECT ST_AsText(ST_Buffer(ST_GeomFromText(:ref_wkt, :ref_srid)::geography, :dist_m)::geometry) AS wkt, :ref_srid AS srid"
+
+  within:
+    task: 'Return every city in this agent''s own cities table whose centroid
+      lies inside the given zone (ST_Within), skipping cities with a NULL
+      centroid and every name in :exclude.'
+
+    placeholders:
+      zone_wkt:  'text — WKT of the zone polygon'
+      zone_srid: 'int — SRID of the zone polygon'
+      exclude:   'text[] — city names to leave out (use NOT (name = ANY(:exclude)))'
+
+    columns: 'entity_name, wkt (ST_AsText of the centroid), srid (ST_SRID of the centroid).'
+
+    examples:
+      - input:
+          question: "Which cities lie within 100 km of Dortmund?"
+          target_entity: city
+        output:
+          sql: "SELECT c.city_name AS entity_name, ST_AsText(c.centroid) AS wkt, ST_SRID(c.centroid) AS srid FROM cities c WHERE c.centroid IS NOT NULL AND ST_Within(c.centroid, ST_GeomFromText(:zone_wkt, :zone_srid)) AND NOT (c.city_name = ANY(:exclude))"

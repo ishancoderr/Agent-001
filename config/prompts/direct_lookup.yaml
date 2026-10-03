@@ -78,20 +78,3 @@ examples:
 
   - query: "Give me married and live birth data for Berlin in 2020"
     output: {spatial: ["Berlin"], temporal: [2020], attributes: ["marriages", "live_births"], entity_type: "state"}
-
-# Stage-3 examples for this same category — worked SQL for the two shapes
-# agent1/retrieval/sql_generator.py's partition_check()/demographics() ever
-# need for a DIRECT_LOOKUP: which of the requested entities exist here at
-# all, and the actual attribute values for the ones that do. See
-# config/prompts/sql_generation.yaml for the shared rules these follow.
-sql_generation:
-  examples:
-    - request: "Which of these federal state names does this agent hold at least one row for in the state attributes table, regardless of year or which attribute values are actually filled in: ['Bayern', 'Sachsen']. Return the distinct federal state names found, in a single column aliased exactly as entity_name."
-      output:
-        sql: "SELECT DISTINCT s.state_name AS entity_name FROM states s JOIN state_demographics sd ON sd.state_id = s.state_id WHERE s.state_name = ANY(:names)"
-        params: {names: ["Bayern", "Sachsen"]}
-
-    - request: "For federal states ['Bayern'] and years [2021], return population, marriages from the state attributes table, one row per federal state per year. Alias the state name column exactly as entity_name, the year column exactly as year, and each attribute column exactly by its own name (population, marriages) — no other aliases — in that exact column order: entity_name, year, then each attribute in the order listed. Order the rows by state name then year."
-      output:
-        sql: "SELECT s.state_name AS entity_name, sd.stat_year AS year, sd.population AS population, sd.marriages AS marriages FROM state_demographics sd JOIN states s ON s.state_id = sd.state_id WHERE s.state_name = ANY(:names) AND sd.stat_year = ANY(:years) ORDER BY s.state_name, sd.stat_year"
-        params: {names: ["Bayern"], years: [2021]}

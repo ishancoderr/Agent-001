@@ -1,0 +1,42 @@
+# SqlWriter prompt for shapes — see agent1/retrieval/sql_writer.py.
+#
+# Used whenever a shape is needed: GEOMETRY_LOOKUP (Scenarios 9-12), the
+# inputs of a SPATIAL_OPERATION (13-16), the shapes a relationship is tested
+# on (17-19), the reference city of a buffer (20), and Agent-2's own
+# :missing-geometries asks.
+#
+# One statement per entity type: the caller groups the names by type and
+# binds them to :names. Rows whose shape is NULL must still be returned —
+# that is how the gap detector tells "geometry-null" (row exists, shape
+# empty) from "unknown-feature" (no row at all), Section 2.3 of the
+# scenarios document.
+
+version: 1
+
+steps:
+
+  fetch:
+    task: 'Fetch the shape of every named place of the given entity_type from
+      that entity type''s own table. Return a row for every name that has a
+      row, even when its shape is NULL — never filter out NULL shapes.'
+
+    placeholders:
+      names: 'text[] — the place names (compare with = ANY(:names))'
+
+    columns: 'entity_name (the stored name), wkt (ST_AsText of the shape,
+      NULL when the shape is NULL), srid (ST_SRID of the shape).'
+
+    examples:
+      - input:
+          question: "What is the geometry of Bayern?"
+          entity_type: state
+          spatial: ["Bayern"]
+        output:
+          sql: "SELECT s.state_name AS entity_name, ST_AsText(s.geo_shape) AS wkt, ST_SRID(s.geo_shape) AS srid FROM states s WHERE s.state_name = ANY(:names)"
+
+      - input:
+          question: "What are the geometries of München and Bayern?"
+          entity_type: city
+          spatial: ["Munich"]
+        output:
+          sql: "SELECT c.city_name AS entity_name, ST_AsText(c.centroid) AS wkt, ST_SRID(c.centroid) AS srid FROM cities c WHERE c.city_name = ANY(:names)"

@@ -53,22 +53,24 @@ controller/query_controller.py  ← orchestrates every step, logs each one
        │                ▼
        │              QueryParams        the one object every later step reads
        │
-       │  STEP 2 ── pipeline/spatial_validator.py
-       │              DIRECT_LOOKUP → skipped entirely (this step only runs for the
-       │              three verdict-style relationship categories — adjacency, direction,
-       │              distance — which resolve state names via PostGIS ST_Intersects /
-       │              ST_Azimuth / ST_DWithin before anything else can run)
+       │  STEP 2 ── (relationship questions only) retrieval/spatial_compute.py
+       │              resolve_relationship(): get the shapes it needs (step 3-5 below,
+       │              for shapes), then one LLM-written SQL decides WHICH states touch /
+       │              lie north of / lie within N km of the reference. Those states
+       │              then go through steps 3-5 as a normal data question.
        │
-       │  STEP 3-5 ── retrieval/local_store.py's answer_query()
+       │  STEP 3-5 ── retrieval/gap_detector.py's answer_query()
        │              │
-       │              ├─ LocalStore.lookup(params)
-       │              │    retrieval/sql_generator.py's SqlGenerator writes a validated
-       │              │    SELECT (partition_check, then demographics), run against this
-       │              │    agent's own DB. Classifies each (entity, year) as:
-       │              │      found                      → DataRecord
-       │              │      no row at all for the year  → temporal gap
-       │              │      row exists, value is NULL   → attribute gap
-       │              │      entity not in this partition → spatial gap
+       │              ├─ fetch_values()
+       │              │    retrieval/sql_writer.py's SqlWriter: the LLM writes one SELECT
+       │              │    from the question + parameters (config/prompts/sql/direct_lookup.yaml);
+       │              │    Python binds :names/:years; validate_sql() checks it; it runs
+       │              │    against this agent's own DB (one self-correcting retry on error).
+       │              │
+       │              ├─ detect_gaps()
+       │              │    requested (entity × year × attribute) − what came back, each
+       │              │    missing slot classified spatial / temporal / thematic →
+       │              │    gap signature (S, T, A); grouped into as few GapSlots as possible
        │              │
        │              ├─ if gaps: messaging/peer_client.py's ask_data(gaps)
        │              │    GapSlot → kqml_messaging.MissingSlot (carries entity_type) →
@@ -90,9 +92,13 @@ QueryResponse
 `GEOMETRY_LOOKUP` and `SPATIAL_OPERATION` (shape combination — union, intersection,
 difference, symmetric difference) and `SPATIAL_RELATIONSHIP_BUFFER` (an open-ended "which
 cities are within N km of X" query, where the targets can't be named in advance) each
-follow their own handler in `query_controller.py`, using `retrieval/geometry_resolver.py`
-instead of `local_store.py` — but the same "resolve locally first, ask the peer only for
-what's missing" shape applies throughout.
+follow their own handler in `query_controller.py`. They run the same steps on shapes
+instead of values — `gap_detector.get_shapes()` writes the shape fetch with SqlWriter, finds
+the missing shapes (no row = unknown-feature, NULL shape = geometry-null), asks the peer
+for them in one `:missing-geometries` ask, and `retrieval/spatial_compute.py` then lets
+SqlWriter write the one statement that computes the answer (ST_Union, ST_Touches, the
+buffer zone, ...). For the open-ended buffer question the zone itself is sent to the peer
+to test its own cities (query delegation).
 
 ---
 
@@ -111,12 +117,13 @@ Agent-001/
 │   │   └── name_aliases.yaml        ← name spelling variants (Munich/München, ...)
 │   └── prompts/
 │       ├── classify.yaml            ← stage-1: which of the 8 categories is this?
-│       ├── direct_lookup.yaml       ← stage-2 + SQL-generation examples, per category
+│       ├── direct_lookup.yaml       ← stage-2 extraction prompt, per category
 │       ├── geometry_lookup.yaml
 │       ├── spatial_operation.yaml
 │       ├── spatial_relationship.yaml         (adjacency/direction/distance, shared)
 │       ├── spatial_relationship_buffer.yaml
-│       └── sql_generation.yaml      ← SQL-generation rules shared by every category
+│       └── sql/                     ← SqlWriter prompts: rules.yaml (shared) + one file
+│                                      per category with its steps (fetch, compute, ...)
 │
 └── agent1/
     ├── main.py                      ← FastAPI app + startup kqml-messaging version check
@@ -135,29 +142,24 @@ Agent-001/
     │   ├── query_parser.py          ← turns raw extraction JSON into a validated QueryParams
     │   ├── query_params.py          ← QueryParams/SpatialRelationship + config-derived constants
     │   ├── prompt_loader.py         ← assembles config/prompts/*.yaml into the text sent to the LLM
-    │   ├── gazetteer.py             ← name normalization, built from name_aliases.yaml
-    │   └── spatial_validator.py     ← PostGIS adjacency/direction/distance resolution
+    │   └── gazetteer.py             ← name normalization, built from name_aliases.yaml
     │
     ├── retrieval/                   ← local DB lookup, LLM-generated SQL, gap detection
-    │   ├── sql_generator.py         ← SqlGenerator + validate_sql() (the injection-safety layer)
-    │   ├── local_store.py           ← partition check, demographics lookup, gap classification,
-    │   │                              answer_query() (the "detect gaps, ask peer, merge" entry point)
-    │   └── geometry_resolver.py     ← the same, for GEOMETRY_LOOKUP/SPATIAL_OPERATION shapes
+    │   ├── sql_writer.py            ← SqlWriter: question + parameters + category → one validated
+    │   │                              SELECT; validate_sql(); run()
+    │   ├── gap_detector.py          ← own data → gaps → ask Agent-2 → merge, for values and shapes;
+    │   │                              also answers Agent-2's asks
+    │   └── spatial_compute.py       ← operations, relationships, buffer/delegation on complete shapes
     │
     ├── messaging/                   ← KQML agent-to-agent communication
     │   ├── agent_registry.py        ← N-agent URL registry, read from .env
-    │   ├── kqml_client.py           ← thin wrapper: send a demographic-data ask
-    │   ├── kqml_geometry_client.py  ← thin wrapper: send a geometry ask
     │   └── peer_client.py           ← builds and sends every KQML message this agent asks with
     │
     ├── result/
     │   └── merger.py                ← combine this agent's + the peer's records, sorted
     │
-    ├── evaluation/
-    │   └── metrics_logger.py        ← writes evaluation_metrics.log (full ask/tell trace per request)
-    │
-    └── utils/
-        └── show_sql.py              ← dev tool: print SQL for a query without running it
+    └── evaluation/
+        └── metrics_logger.py        ← writes evaluation_metrics.log (full ask/tell trace per request)
 ```
 
 The shared package **`kqml-messaging`** (a separate repo,
@@ -178,7 +180,7 @@ columns, whether the set is small and fixed ("enumerable") or open-ended.
 each one (population, marriages, ...), including the aliases a user might type for each
 column. Both are read by `agent1/pipeline/query_params.py` (to build the valid
 entity-type/attribute sets), `agent1/pipeline/gazetteer.py` (to recognize names in a
-query), `agent1/retrieval/sql_generator.py` (to build the SQL allowlist and the schema
+query), `agent1/retrieval/sql_writer.py` (to build the SQL allowlist and the schema
 description the LLM is shown), and `agent1/pipeline/prompt_loader.py` (to generate the
 prompt text). Adding a new entity or attribute table is a YAML edit plus a database
 migration — see `EXTENDING.md`.
@@ -187,17 +189,18 @@ migration — see `EXTENDING.md`.
 
 ## How SQL actually gets written
 
-Every SQL statement that runs against this agent's own database — the demographic lookup,
-a geometry lookup, a spatial-relationship query — is written by an LLM call
-(`agent1/retrieval/sql_generator.py`'s `SqlGenerator`), not hand-coded. The model is shown
-only the schema declared in `entities.yaml`/`attributes.yaml` and a handful of worked
-examples (from each category's own `config/prompts/*.yaml` file, under its
-`sql_generation:` key). Before anything runs, `validate_sql()` parses the statement with a
-real SQL parser (`sqlglot`, not regex) and rejects it unless it's a single, read-only
-`SELECT` that only references allowlisted tables/columns/functions — values are always
-bound parameters, never written into the SQL text by the model. Statements whose shape
-never changes (a named-entity lookup, a buffer, a binary geometry operation) are generated
-once per process and reused, not regenerated on every call.
+Every SQL statement that runs against this agent's own database — values, shapes, an
+operation, a relationship test, a buffer zone — is written by one class,
+`agent1/retrieval/sql_writer.py`'s `SqlWriter`. Because the category is already known and
+the parameters are already extracted, it needs no method per query shape: the model is
+shown the shared rules (`config/prompts/sql/rules.yaml`), the schema declared in
+`entities.yaml`/`attributes.yaml`, and the task, placeholders, output columns and worked
+examples for this category and step (`config/prompts/sql/<category>.yaml`). The model
+writes only the SQL text; every value is bound by Python under the placeholder names the
+prompt lists. Before anything runs, `validate_sql()` parses the statement with a real SQL
+parser (`sqlglot`, not regex) and rejects it unless it's a single, read-only `SELECT` on
+allowlisted tables/columns with no forbidden functions. If a statement fails a check or the
+database rejects it, the error goes back to the model once so it can correct itself.
 
 ---
 
@@ -342,12 +345,6 @@ returns a KQML `tell`.
 ---
 
 ## Developer tools
-
-Print the SQL a query would run, without hitting the database:
-
-```bash
-python -m agent1.utils.show_sql "Give me population for Hessen from 2022 to 2025"
-```
 
 Every request also writes a full step-by-step trace — including the exact KQML `ask`/`tell`
 JSON exchanged — to `evaluation_metrics.log`, useful for debugging exactly what a peer was

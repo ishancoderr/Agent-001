@@ -1,2 +1,1 @@
-from .local_store import answer_query, execute_local_lookup_from_slots, DataRecord, GapSlot, LocalResult
-from .geometry_resolver import resolve_geometries
+from .gap_detector import answer_query, lookup_for_peer, shapes_for_peer, DataRecord, GapSlot, LocalResult

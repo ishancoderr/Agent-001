@@ -134,7 +134,7 @@ entity_type_rules:
 ```
 
 Everything else in `config/prompts/` (`direct_lookup.yaml`'s attribute/gazetteer blocks,
-`sql_generation.yaml`'s shared rules) is generated dynamically from `entities.yaml` and
+`config/prompts/sql/`'s schema description) is generated dynamically from `entities.yaml` and
 `attributes.yaml` — no edit needed there. See §3 below for how that generation actually
 works, if you want to understand why these two files are the exception.
 
@@ -226,14 +226,15 @@ isn't optional the way attribute data is). Both mechanisms are why §1's Steps 2
 are enough to make a new entity askable for `DIRECT_LOOKUP`/`GEOMETRY_LOOKUP` — no template
 edit needed for those two files specifically.
 
-**SQL generation prompts live *inside* each category's own file too** — look for the
-`sql_generation:` key at the bottom of `direct_lookup.yaml`, `geometry_lookup.yaml`, etc.
-These are worked examples of the SQL shape `agent1/retrieval/sql_generator.py` should
-produce for that category; the safety rules every one of them has to follow (SELECT-only,
-bound parameters, no comments, ...) live once in `config/prompts/sql_generation.yaml` and
-are shared across every category rather than repeated. You will not normally need to touch
-these when adding an entity — the existing examples already teach the model the general
-pattern (name a table, alias its columns) generically enough to extend to a new one.
+**SQL prompts live in `config/prompts/sql/`** — one file per category
+(`direct_lookup.yaml`, `geometry_lookup.yaml`, ...), each listing its steps (`fetch`,
+`compute`, ...) with a task, the placeholders Python binds, the output columns the caller
+reads, and worked examples. `agent1/retrieval/sql_writer.py`'s `SqlWriter` assembles one
+system prompt per category and step from these plus `config/prompts/sql/rules.yaml`, the
+safety rules every statement has to follow (SELECT-only, values only through placeholders,
+no comments, ...). You will not normally need to touch these when adding an entity — the
+schema description the model sees is generated from `entities.yaml`/`attributes.yaml`, and
+the examples already teach the general pattern (name a table, alias its columns).
 
 **Testing a prompt change**: there's no separate "compile" step — edit the YAML, restart
 the server (prompts are assembled once at import time), and send a test query. If you want
@@ -249,7 +250,7 @@ print(EXTRACT_TEMPLATES["DIRECT_LOOKUP"])
 
 ## 4. A safety note
 
-Whatever SQL the model generates is never trusted outright — `agent1/retrieval/sql_generator.py`'s
+Whatever SQL the model generates is never trusted outright — `agent1/retrieval/sql_writer.py`'s
 `validate_sql()` parses it with a real SQL parser (not regex) and rejects anything that
 isn't a single, read-only `SELECT` referencing only tables/columns declared in
 `entities.yaml`/`attributes.yaml`, with values always passed as bound parameters, never

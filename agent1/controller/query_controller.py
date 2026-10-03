@@ -14,16 +14,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, ValidationError
 
 from ..pipeline import run as run_pipeline
-from ..pipeline.gazetteer import normalize_entity_name
-from ..pipeline.query_params import DEFAULT_ENTITY_TYPE, system_capabilities_description
-from ..retrieval import answer_query
-from ..retrieval.geometry_resolver import (
-    resolve_entities, build_city_buffer, buffer_from_point, cities_within_buffer,
-    resolve_named_geometry, execute_operation, fold_union, targets_within_buffer,
-)
-from ..messaging.kqml_geometry_client import send_kqml_geometry_ask, send_kqml_city_buffer_ask
+from ..pipeline.query_params import DEFAULT_ENTITY_TYPE, RELATIONSHIP_TYPES, system_capabilities_description
+from ..retrieval.gap_detector import Exchange, answer_query, get_shapes
+from ..retrieval.spatial_compute import buffer_query, resolve_relationship, run_operation
 from ..evaluation import log_evaluation_metrics
-from kqml_messaging import MessageFactory, MissingGeometrySlot, response_status
+from kqml_messaging import response_status
 
 log = logging.getLogger("agent1.controller.query")
 router = APIRouter()
@@ -118,8 +113,7 @@ def handle_query(body: UserQuery):
     log.info("       │ Request ID : %s", request_id)
     log.info("       │ Query      : %r", body.query)
 
-    # ── Steps 1-2: run the pipeline (parse, classify, extract, and — for
-    # DIRECT_LOOKUP/relationship queries — resolve spatially via PostGIS) ───────
+    # ── Step 1: understand the question (clean, classify, extract params) ────
     log.info("STEP 1 │ Parsing natural-language query with GPT-4o mini ...")
     try:
         params = run_pipeline(body.query, model=body.model)
@@ -159,10 +153,18 @@ def handle_query(body: UserQuery):
         log.info("       │ Relationship: type=%s  refs=%s  dist_km=%s",
                  rel.type, rel.refs, rel.distance_km)
 
-    # ── Step 2: Spatial relationship resolution already ran inside
-    # run_pipeline() (PostGIS, for DIRECT_LOOKUP/relationship queries only) ────
-    if params.query_type != "DIRECT_LOOKUP":
-        log.info("STEP 2 │ Resolved via PostGIS (%s): %s (%d states)",
+    # ── Step 2: a relationship question first finds WHICH states qualify:
+    # get the shapes it needs (asking Agent-2 for missing ones), then the
+    # LLM-written relationship SQL (Scenarios 17-19) ────────────────────────────
+    rel_queries: List[str] = []
+    rel_exchange = Exchange()
+    if params.query_type in RELATIONSHIP_TYPES:
+        try:
+            params = resolve_relationship(params, rel_queries, rel_exchange)
+        except ValueError as exc:
+            log.error("STEP 2 │ FAILED – %s", exc)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        log.info("STEP 2 │ Resolved (%s): %s (%d states)",
                  params.query_type, params.spatial, len(params.spatial))
     else:
         log.info("STEP 2 │ Skipped (DIRECT_LOOKUP – no spatial resolution needed)")
@@ -190,20 +192,19 @@ def handle_query(body: UserQuery):
             "extract_model":      params.extract_model,
             "extracted_data":    params.extracted_data,
             "local_resolution": {
-                "resolution_method": f"PostGIS spatial relationship ({params.query_type})",
+                "resolution_method": f"LLM-written PostGIS relationship SQL ({params.query_type})",
                 "resolved_states":   states,
-                "note":              "verdict relationships (adjacency/direction/distance) are "
-                                      "computed locally via PostGIS once geometries are present — "
-                                      "no demographic data was requested, so no KQML ask was needed",
+                "unknown_states":    params.unknown_states,
+                "sql_queries":       rel_queries,
             },
-            "kqml_exchanges":    [],
+            "kqml_exchanges":    rel_exchange.messages,
             "phase1_ms":         total_ms,
             "phase2_ms":         0.0,
             "phase3_ms":         0.0,
             "total_ms":          total_ms,
             "tokens_agent1":     tokens_agent1,
-            "tokens_agent2":     0,
-            "tokens_total":      tokens_agent1,
+            "tokens_agent2":     rel_exchange.tokens_agent2,
+            "tokens_total":      tokens_agent1 + rel_exchange.tokens_agent2,
             "total_records":     len(states),
             "total_data_points": len(states),
             "present_data_points": len(states),
@@ -239,18 +240,20 @@ def handle_query(body: UserQuery):
             "states": states,
             "unknown_states": params.unknown_states,
             "summary": {"total": len(states), "verdict": params.verdict,
-                       "unknown": len(params.unknown_states)},
+                       "unknown": len(params.unknown_states),
+                       "kqml_turns": rel_exchange.kqml_turns},
             "performance": {
                 "phase1_ms": round(total_ms, 1),
                 "phase2_ms": 0.0,
                 "phase3_ms": 0.0,
                 "total_ms":  round(total_ms, 1),
-                "tokens": {"agent_1": tokens_agent1, "agent_2": 0, "total": tokens_agent1},
+                "tokens": {"agent_1": tokens_agent1, "agent_2": rel_exchange.tokens_agent2,
+                           "total": tokens_agent1 + rel_exchange.tokens_agent2},
             },
         }
 
     # ── Steps 3-5: local lookup, KQML ask for gaps, merge — one call now,
-    # in retrieval/local_store.py's answer_query() ─────────────────────────────
+    # in retrieval/gap_detector.py's answer_query() ───────────────────────────
     log.info("STEP 3-5 │ Resolving locally, asking Agent-2 for gaps, merging ...")
     log.info("       │ Looking for %d state(s) × %d year(s) × attrs=%s",
              len(params.spatial), len(params.temporal), params.attributes)
@@ -258,9 +261,9 @@ def handle_query(body: UserQuery):
     answered = answer_query(params)
     local_result   = answered.local_result
     merged         = answered.merged
-    kqml_turns     = answered.kqml_turns
-    tokens_agent2  = answered.tokens_agent2
-    kqml_exchanges = answered.kqml_exchanges
+    kqml_turns     = answered.kqml_turns + rel_exchange.kqml_turns
+    tokens_agent2  = answered.tokens_agent2 + rel_exchange.tokens_agent2
+    kqml_exchanges = rel_exchange.messages + answered.kqml_exchanges
     phase1_ms      = answered.phase1_ms
     phase2_ms      = answered.phase2_ms
     phase3_ms      = answered.phase3_ms
@@ -341,7 +344,8 @@ def handle_query(body: UserQuery):
                 {"spatial": g.spatial, "temporal": g.temporal, "attributes": g.attributes}
                 for g in local_result.gaps
             ],
-            "sql_queries":        local_result.queries,
+            "gap_diagnosis":      local_result.diagnosis,
+            "sql_queries":        rel_queries + local_result.queries,
         },
         "parsed_spatial":      params.spatial,
         "parsed_temporal":     params.temporal,
@@ -545,115 +549,33 @@ def _handle_geometry(params, raw_query: str, request_id: str,
                                 "tokens":{"agent_1":tokens_agent1,"agent_2":0,"total":tokens_agent1}}}
     log.info("GEOM   │ Resolving %d entity/entities: %s", len(entities), entities)
 
-    # Check the local DB first — using the plain {"entity_name",
-    # "entity_type"} dicts extraction already produced, not a
-    # MissingGeometrySlot built for every entity up front. Building one
-    # Pydantic-validates entity_type against kqml_messaging.EntityType
-    # (city/state only), which would fail immediately for any other of
-    # entities.yaml's own types (e.g. river) even when this agent already
-    # holds it locally and Agent-2 was never going to be asked at all.
+    # Scenarios 9-12: SqlWriter fetches our shapes, the gap (no row, or row
+    # with a NULL shape) goes to Agent-2 in one :missing-geometries ask.
     sql_queries: List[str] = []
-    found_local, still_missing = resolve_entities(entities, queries=sql_queries)
-    local_names = {fg["entity_name"] for fg in found_local}
+    exchange = Exchange()
+    pairs = [(e["entity_name"], e["entity_type"]) for e in entities]
+    shapes, still_missing = get_shapes(pairs, sql_queries, exchange)
+    kqml_turns     = exchange.kqml_turns
+    tokens_agent2  = exchange.tokens_agent2
+    kqml_exchanges = exchange.messages
 
-    t1 = time.perf_counter()
-
-    # Only entities genuinely absent locally are ever turned into a real
-    # MissingGeometrySlot — the one place that validation actually needs to
-    # happen, since it's the one place an entity_type has to travel over
-    # the wire. An entity_type the KQML protocol doesn't carry yet (again,
-    # river) can't be asked for; it's logged and left "not_found" rather
-    # than taking the rest of the request down with it.
-    remote_askable: List[MissingGeometrySlot] = []
-    for m in still_missing:
-        try:
-            remote_askable.append(MessageFactory.missing_geometry_slot(
-                spatial_entity=m["entity_name"], entity_type=m["entity_type"],
-            ))
-        except (ValueError, ValidationError) as exc:
-            log.warning(
-                "GEOM   │ %r has entity_type=%r, which the KQML protocol doesn't "
-                "carry yet — cannot ask Agent-2 for it: %s",
-                m["entity_name"], m["entity_type"], exc,
-            )
-
-    # Ask Agent-2 for anything not found locally
-    found_remote = []
-    kqml_turns   = 0
-    tokens_agent2 = 0
-    kqml_exchanges: List[Dict] = []
-    if remote_askable:
-        log.info("GEOM   │ %d missing locally — asking Agent-2 ...", len(remote_askable))
-        try:
-            resp          = send_kqml_geometry_ask(remote_askable)
-            found_remote  = resp.get("found", [])
-            kqml_turns    = 1
-            if "ask_message" in resp and "tell_message" in resp:
-                kqml_exchanges.append({"ask": resp["ask_message"], "tell": resp["tell_message"]})
-            log.info("GEOM   │ Agent-2 returned %d geometry result(s)", len(found_remote))
-        except Exception as exc:
-            log.warning("GEOM   │ Agent-2 unreachable — %s", exc)
-
-    t2 = time.perf_counter()
-
-    # Index found geometries by name (case-insensitive) — both as the same
-    # plain-dict shape, found_local already is one and found_remote (real
-    # FoundGeometrySlot objects the shared library validated on the way
-    # back from Agent-2) is normalized to match, so _find_result()/the
-    # result-list build below never need to care which side an answer
-    # came from.
-    local_index  = {fg["entity_name"].lower(): fg for fg in found_local}
-    remote_index = {
-        fg.spatial_entity.lower(): {
-            "entity_name": fg.spatial_entity, "entity_type": fg.entity_type,
-            "wkt": fg.geometry, "srid": fg.srid,
-        }
-        for fg in found_remote
-    }
-
-    def _find_result(requested_name: str):
-        """Return (result dict, source) or (None, 'not_found')."""
-        # The gazetteer supplies the database's own spelling; the name as asked
-        # for is kept as a fallback in case the reply used that form.
-        variants = list(dict.fromkeys(filter(None, [
-            normalize_entity_name(requested_name, "city"),
-            requested_name,
-        ])))
-        for v in variants:
-            key = v.lower()
-            if key in local_index:
-                return local_index[key], "Agent-1"
-            if key in remote_index:
-                return remote_index[key], "Agent-2"
-        return None, "not_found"
-
-    # Build result list preserving request order
     geometries = []
-    for e in entities:
-        fg, source = _find_result(e["entity_name"])
-        if fg is not None:
-            geometries.append({
-                "entity_name": fg["entity_name"],
-                "entity_type": fg["entity_type"],
-                "wkt":         fg["wkt"],
-                "srid":        fg["srid"],
-                "source":      source,
-            })
+    for pair in pairs:
+        shape = shapes.get(pair)
+        if shape is not None:
+            geometries.append({"entity_name": shape.entity_name, "entity_type": shape.entity_type,
+                               "wkt": shape.wkt, "srid": shape.srid, "source": shape.source})
         else:
-            geometries.append({
-                "entity_name": e["entity_name"],
-                "entity_type": e["entity_type"],
-                "wkt":         None,
-                "srid":        None,
-                "source":      "not_found",
-            })
+            geometries.append({"entity_name": pair[0], "entity_type": pair[1], "wkt": None, "srid": None,
+                               "source": "not_found", "miss_mode_agent1": still_missing.get(pair)})
 
-    t3 = time.perf_counter()  # end of phase 3 (merge / index / result-list build)
-
-    phase1_ms = (t1 - t0) * 1000
-    phase2_ms = (t2 - t1) * 1000
-    phase3_ms = (t3 - t2) * 1000
+    t3 = time.perf_counter()
+    phase1_ms = exchange.local_ms
+    phase2_ms = exchange.peer_ms
     total_ms  = (t3 - t0) * 1000
+    phase3_ms = max(total_ms - phase1_ms - phase2_ms, 0.0)
+    local_names = sorted(s.entity_name for s in shapes.values() if s.source == "Agent-1")
+    missing_here = [name for (name, _t) in pairs if (name, _t) not in shapes or shapes[(name, _t)].source != "Agent-1"]
 
     found_count   = sum(1 for g in geometries if g["wkt"] is not None)
     missing_count = len(geometries) - found_count
@@ -677,8 +599,8 @@ def _handle_geometry(params, raw_query: str, request_id: str,
         "extracted_data":    params.extracted_data,
         "local_resolution": {
             "entities_requested": [e["entity_name"] for e in entities],
-            "found_locally":      sorted(local_names),
-            "still_missing_after_local_db": [m["entity_name"] for m in still_missing],
+            "found_locally":      local_names,
+            "still_missing_after_local_db": missing_here,
             "sql_queries":        sql_queries,
         },
         "kqml_exchanges":    kqml_exchanges,
@@ -746,15 +668,13 @@ _AREA_GEOMETRY_TYPES = {"POLYGON", "MULTIPOLYGON"}
 
 def _handle_spatial_operation(params, raw_query: str, request_id: str,
                               timestamp: str, t0: float, tokens_agent1: int):
-    """Scenarios 13-16 (Union/Intersection/Difference/SymDifference) and 20
-    (Buffer+Within over NAMED targets). Every entity involved is named, so this
-    resolves each one's geometry exactly like GEOMETRY_LOOKUP (locally, or via a
-    normal :missing-geometries ask to the peer), checks SRID agreement, and only
-    then runs the operation locally — the operation itself is never missing
-    (Section 3.5), only an input can be."""
-    operation   = params.operation
-    entity_type = params.entity_type or DEFAULT_ENTITY_TYPE
-    names       = params.spatial or []
+    """Scenarios 13-16 (Union/Intersection/Difference/SymDifference) and the
+    named-target BufferWithin. Every input is named, so its shape is fetched
+    like GEOMETRY_LOOKUP (locally, or via a :missing-geometries ask), the SRIDs
+    are checked, and only then does the LLM-written operation SQL run here —
+    the operation itself is never missing (Section 3.5), only an input can be."""
+    operation = params.operation
+    names     = params.spatial or []
 
     if not operation or len(names) < 2:
         return {"request_id": request_id, "status": "error",
@@ -763,346 +683,162 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
                                 "phase2_ms": 0, "phase3_ms": 0, "total_ms": 0,
                                 "tokens": {"agent_1": tokens_agent1, "agent_2": 0, "total": tokens_agent1}}}
 
-    log.info("SPOP   │ Operation: %s  entities=%s  entity_type=%s", operation, names, entity_type)
+    log.info("SPOP   │ Operation: %s  entities=%s", operation, names)
 
-    # ── Resolve every named entity's geometry, locally first ──────────────────
     sql_queries: List[str] = []
-    resolved: Dict[str, Dict] = {}
-    still_missing: List[str] = []
-    for name in names:
-        g = resolve_named_geometry(name, entity_type, queries=sql_queries)
-        if g is not None:
-            resolved[name] = g
-        else:
-            still_missing.append(name)
-
-    t1 = time.perf_counter()
-
-    # ── Ask the peer for whatever wasn't held locally, exactly like GEOMETRY_LOOKUP ──
-    kqml_turns    = 0
-    tokens_agent2 = 0
-    kqml_exchanges: List[Dict] = []
-    sources: Dict[str, str] = {n: "Agent-1" for n in resolved}
-    if still_missing:
-        log.info("SPOP   │ %d entity/entities missing locally — asking Agent-2 ...", len(still_missing))
-        # A BufferWithin reference is often a city while its targets are states
-        # (Scenario 20), so guess per-name from the state gazetteer rather than
-        # trusting one entity_type for the whole operation.
-        from ..pipeline.query_parser import GERMAN_STATES
-        slots = [
-            MessageFactory.missing_geometry_slot(
-                spatial_entity=n, entity_type=("state" if n in GERMAN_STATES else "city"),
-            )
-            for n in still_missing
-        ]
-        try:
-            resp = send_kqml_geometry_ask(slots)
-            kqml_turns = 1
-            if "ask_message" in resp and "tell_message" in resp:
-                kqml_exchanges.append({"ask": resp["ask_message"], "tell": resp["tell_message"]})
-            for fg in resp.get("found", []):
-                resolved[fg.spatial_entity] = {"name": fg.spatial_entity, "wkt": fg.geometry, "srid": fg.srid}
-                sources[fg.spatial_entity] = "Agent-2"
-            log.info("SPOP   │ Agent-2 returned %d geometry/geometries", len(resp.get("found", [])))
-        except Exception as exc:
-            log.warning("SPOP   │ Agent-2 unreachable — %s", exc)
-
-    t2 = time.perf_counter()
-
-    local_resolution = {
-        "operation":           operation,
-        "entities_requested":  names,
-        "resolved_locally":    [n for n, s in sources.items() if s == "Agent-1"],
-        "still_missing_after_local_db": still_missing,
-        "sql_queries":         sql_queries,
-    }
-
-    unresolved = [n for n in names if n not in resolved]
-    if unresolved:
-        log.warning("SPOP   │ Still unresolved: %s — cannot run operation", unresolved)
-        t3 = time.perf_counter()
-        total_ms = (t3 - t0) * 1000
-        log_evaluation_metrics({
-            "request_id": request_id, "timestamp": timestamp, "query": raw_query,
-            "query_type": "SPATIAL_OPERATION",
-            "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens, "classify_model": params.classify_model, "extract_model": params.extract_model,
-            "extracted_data": params.extracted_data, "local_resolution": local_resolution,
-            "kqml_exchanges": kqml_exchanges,
-            "phase1_ms": (t1 - t0) * 1000, "phase2_ms": (t2 - t1) * 1000, "phase3_ms": 0.0,
-            "total_ms": total_ms,
-            "tokens_agent1": tokens_agent1, "tokens_agent2": tokens_agent2,
-            "tokens_total": tokens_agent1 + tokens_agent2,
-            "total_records": len(names), "total_data_points": len(names),
-            "present_data_points": len(names) - len(unresolved), "missing_data_points": len(unresolved),
-            "complete_records": 0, "partial_records": 0, "empty_records": len(unresolved),
-            "status": response_status(has_found=False, has_missing=True),
-        })
-        return {
-            "request_id": request_id, "status": response_status(has_found=False, has_missing=True),
-            "query": {"raw": raw_query, "type": "SPATIAL_OPERATION", "operation": operation, "spatial": names},
-            "still_missing": unresolved,
-            "performance": {
-                "phase1_ms": round((t1 - t0) * 1000, 1), "phase2_ms": round((t2 - t1) * 1000, 1),
-                "phase3_ms": 0.0, "total_ms": round(total_ms, 1),
-                "tokens": {"agent_1": tokens_agent1, "agent_2": tokens_agent2,
-                           "total": tokens_agent1 + tokens_agent2},
-            },
-        }
-
-    # ── Run the operation locally, now that every input is present ────────────
+    exchange = Exchange()
+    error: Optional[str] = None
     try:
-        if operation == "Union":
-            result = fold_union([resolved[n] for n in names], queries=sql_queries)
-            payload = {"result": {"wkt": result["wkt"], "srid": result["srid"],
-                                  "geometry_type": _wkt_geometry_type(result["wkt"])}}
-        elif operation in ("Intersection", "Difference", "SymDifference"):
-            # Order matters for Difference (first minus second); the other two
-            # are symmetric, but the named order is preserved regardless.
-            result = execute_operation(operation, resolved[names[0]], resolved[names[1]], queries=sql_queries)
-            geometry_type = _wkt_geometry_type(result["wkt"])
-            payload = {"result": {"wkt": result["wkt"], "srid": result["srid"],
-                                  "geometry_type": geometry_type}}
-            if operation == "Intersection":
-                # A correct intersection can come back as a line (two states
-                # only touch) or empty (they don't touch at all) rather than a
-                # polygon (a real overlap) - Scenario 14's own example. All
-                # three are valid, complete answers; only the last one means
-                # any land is actually shared, so that reading is spelled out
-                # rather than left for the WKT prefix to imply.
-                has_area = geometry_type in _AREA_GEOMETRY_TYPES
-                payload["result"]["has_shared_area"] = has_area
-                if not has_area:
-                    payload["note"] = (
-                        f"{names[0]} and {names[1]} share no area"
-                        + (f" — they meet only along a boundary ({geometry_type})."
-                           if geometry_type in ("LINESTRING", "MULTILINESTRING")
-                           else " — their boundaries do not touch at all."
-                           if geometry_type in ("GEOMETRYCOLLECTION", "EMPTY", "POINT", "MULTIPOINT")
-                           else ".")
-                    )
-        elif operation == "BufferWithin":
-            ref = resolved[names[0]]
-            targets = [resolved[n] for n in names[1:]]
-            matches = targets_within_buffer(ref, params.distance_km or 100.0, targets, queries=sql_queries)
-            payload = {"reference": names[0], "distance_km": params.distance_km or 100.0,
-                       "targets": matches}
-        else:
-            raise ValueError(f"Unknown operation {operation!r}")
-    except ValueError as exc:
-        # SRID mismatch or similar — a real error, not a gap.
+        outcome = run_operation(params, sql_queries, exchange)
+    except ValueError as exc:                   # SRID mismatch or unusable SQL — a real error, not a gap
         log.error("SPOP   │ Operation failed: %s", exc)
-        t3 = time.perf_counter()
-        total_ms = (t3 - t0) * 1000
-        log_evaluation_metrics({
-            "request_id": request_id, "timestamp": timestamp, "query": raw_query,
-            "query_type": "SPATIAL_OPERATION",
-            "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens, "classify_model": params.classify_model, "extract_model": params.extract_model,
-            "extracted_data": params.extracted_data, "local_resolution": local_resolution,
-            "kqml_exchanges": kqml_exchanges,
-            "phase1_ms": (t1-t0)*1000, "phase2_ms": (t2-t1)*1000, "phase3_ms": 0.0,
-            "total_ms": total_ms,
-            "tokens_agent1": tokens_agent1, "tokens_agent2": tokens_agent2,
-            "tokens_total": tokens_agent1 + tokens_agent2,
-            "total_records": len(names), "total_data_points": len(names),
-            "present_data_points": 0, "missing_data_points": len(names),
-            "complete_records": 0, "partial_records": 0, "empty_records": len(names),
-            "status": "error",
-        })
-        return {"request_id": request_id, "status": "error", "message": str(exc),
-                "performance": {"phase1_ms": round((t1-t0)*1000,1), "phase2_ms": round((t2-t1)*1000,1),
-                                "phase3_ms": 0.0, "total_ms": round(total_ms,1),
-                                "tokens": {"agent_1": tokens_agent1, "agent_2": tokens_agent2,
-                                           "total": tokens_agent1 + tokens_agent2}}}
+        outcome, error = {"shapes": {}, "missing": {}, "result": None}, str(exc)
 
-    t3 = time.perf_counter()
-    phase1_ms = (t1 - t0) * 1000
-    phase2_ms = (t2 - t1) * 1000
-    phase3_ms = (t3 - t2) * 1000
-    total_ms  = (t3 - t0) * 1000
+    shapes, missing, result = outcome["shapes"], outcome["missing"], outcome["result"]
+    sources = {s.entity_name: s.source for s in shapes.values()}
+    unresolved = sorted({name for (name, _t) in missing})
+
+    total_ms  = (time.perf_counter() - t0) * 1000
+    phase1_ms = exchange.local_ms
+    phase2_ms = exchange.peer_ms
+    phase3_ms = max(total_ms - phase1_ms - phase2_ms, 0.0)
+
+    if error:
+        status = "error"
+    elif result is None:
+        status = response_status(has_found=False, has_missing=True)
+    else:
+        status = response_status(has_found=True, has_missing=False)
+
+    payload: Dict[str, Any] = {}
+    if result is not None and operation == "BufferWithin":
+        payload = result
+    elif result is not None:
+        geometry_type = _wkt_geometry_type(result["wkt"])
+        payload = {"result": {"wkt": result["wkt"], "srid": result["srid"], "geometry_type": geometry_type}}
+        if operation == "Intersection":
+            # Two neighbouring states meet along a line and share no area
+            # (Scenario 14) — a correct, complete answer, spelled out here.
+            has_area = geometry_type in _AREA_GEOMETRY_TYPES
+            payload["result"]["has_shared_area"] = has_area
+            if not has_area:
+                payload["note"] = (
+                    f"{names[0]} and {names[1]} share no area"
+                    + (f" — they meet only along a boundary ({geometry_type})."
+                       if geometry_type in ("LINESTRING", "MULTILINESTRING")
+                       else " — their boundaries do not touch at all."
+                       if geometry_type in ("GEOMETRYCOLLECTION", "EMPTY", "POINT", "MULTIPOINT")
+                       else ".")
+                )
 
     log.info(SEPARATOR)
-    log.info("DONE   │ [%s] SPATIAL_OPERATION op=%s status=complete  %.0f ms",
-             request_id, operation, total_ms)
+    log.info("DONE   │ [%s] SPATIAL_OPERATION op=%s status=%s  %.0f ms", request_id, operation, status, total_ms)
     log.info(SEPARATOR)
 
+    found_count = len(names) - len(unresolved)
     log_evaluation_metrics({
         "request_id": request_id, "timestamp": timestamp, "query": raw_query,
         "query_type": "SPATIAL_OPERATION",
-        "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens, "classify_model": params.classify_model, "extract_model": params.extract_model,
+        "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens,
+        "classify_model": params.classify_model, "extract_model": params.extract_model,
         "extracted_data": params.extracted_data,
-        "local_resolution": {**local_resolution, "sources": sources},
-        "kqml_exchanges": kqml_exchanges,
+        "local_resolution": {
+            "operation":          operation,
+            "entities_requested": names,
+            "sources":            sources,
+            "still_missing":      unresolved,
+            "error":              error,
+            "sql_queries":        sql_queries,
+        },
+        "kqml_exchanges": exchange.messages,
         "phase1_ms": phase1_ms, "phase2_ms": phase2_ms, "phase3_ms": phase3_ms, "total_ms": total_ms,
-        "tokens_agent1": tokens_agent1, "tokens_agent2": tokens_agent2,
-        "tokens_total": tokens_agent1 + tokens_agent2,
+        "tokens_agent1": tokens_agent1, "tokens_agent2": exchange.tokens_agent2,
+        "tokens_total": tokens_agent1 + exchange.tokens_agent2,
         "total_records": len(names), "total_data_points": len(names),
-        "present_data_points": len(names), "missing_data_points": 0,
-        "complete_records": len(names), "partial_records": 0, "empty_records": 0,
-        "status": response_status(has_found=True, has_missing=False),
+        "present_data_points": found_count, "missing_data_points": len(unresolved),
+        "complete_records": found_count if result is not None else 0,
+        "partial_records": 0, "empty_records": len(unresolved),
+        "status": status,
     })
 
-    return {
+    response: Dict[str, Any] = {
         "request_id": request_id,
-        "status":     response_status(has_found=True, has_missing=False),
-        "query": {
-            "raw":       raw_query,
-            "type":      "SPATIAL_OPERATION",
-            "operation": operation,
-            "spatial":   names,
-            "sources":   sources,
-        },
+        "status":     status,
+        "query": {"raw": raw_query, "type": "SPATIAL_OPERATION", "operation": operation,
+                  "spatial": names, "sources": sources},
         **payload,
         "performance": {
-            "phase1_ms": round(phase1_ms, 1),
-            "phase2_ms": round(phase2_ms, 1),
-            "phase3_ms": round(phase3_ms, 1),
-            "total_ms":  round(total_ms, 1),
-            "tokens": {
-                "agent_1": tokens_agent1,
-                "agent_2": tokens_agent2,
-                "total":   tokens_agent1 + tokens_agent2,
-            },
+            "phase1_ms": round(phase1_ms, 1), "phase2_ms": round(phase2_ms, 1),
+            "phase3_ms": round(phase3_ms, 1), "total_ms": round(total_ms, 1),
+            "tokens": {"agent_1": tokens_agent1, "agent_2": exchange.tokens_agent2,
+                       "total": tokens_agent1 + exchange.tokens_agent2},
         },
     }
+    if unresolved:
+        response["still_missing"] = unresolved
+    if error:
+        response["message"] = error
+    return response
 
 
 def _handle_relationship_buffer(params, raw_query: str, request_id: str,
                                 timestamp: str, t0: float, tokens_agent1: int):
-    """Scenario 21: which cities lie within N km of a reference city. The targets
-    cannot be named in advance, so a buffer zone is built once and sent to the
-    peer as a shape to test its own catalogue against, rather than a named ask."""
-    ref_city    = params.spatial[0] if params.spatial else None
-    distance_km = params.distance_km or 100.0
-
-    if not ref_city:
+    """Scenario 20: which cities lie within N km of a city. The cities are the
+    answer, not the input, so they cannot be named in a request: the zone is
+    built here, tested against our own cities, then sent to Agent-2 to test
+    its own (query delegation)."""
+    if not params.spatial:
         return {"request_id": request_id, "status": "error",
-                "message": "No reference city found in spatial-operation query.",
+                "message": "No reference city found in the query.",
                 "performance": {"phase1_ms": round((time.perf_counter()-t0)*1000, 1),
                                 "phase2_ms": 0, "phase3_ms": 0, "total_ms": 0,
                                 "tokens": {"agent_1": tokens_agent1, "agent_2": 0, "total": tokens_agent1}}}
 
-    log.info("SPOP   │ Buffer query: %s within %s km", ref_city, distance_km)
+    log.info("SPOP   │ Buffer query: %s within %s km", params.spatial[0], params.distance_km or 100.0)
 
-    kqml_turns    = 0
-    tokens_agent2 = 0
-    kqml_exchanges: List[Dict] = []
     sql_queries: List[str] = []
+    exchange = Exchange()
+    outcome = buffer_query(params, sql_queries, exchange)
+    ref, local, remote = outcome["reference"], outcome["local"], outcome["remote"]
+    distance_km = outcome["distance_km"]
 
-    # ── Resolve the reference point, and build the buffer around it ───────────
-    buffer = build_city_buffer(ref_city, distance_km, queries=sql_queries)
-    ref_source = "Agent-1"
-    if buffer is None:
-        # Not held locally — ask the peer for just the reference point (a normal
-        # named geometry ask), then build the buffer from that point ourselves.
-        log.info("SPOP   │ %r not held locally — resolving reference point from Agent-2 ...", ref_city)
-        from kqml_messaging import MessageFactory as _MF
-        slot = _MF.missing_geometry_slot(spatial_entity=ref_city, entity_type="city")
-        resp = send_kqml_geometry_ask([slot])
-        if "ask_message" in resp and "tell_message" in resp:
-            kqml_exchanges.append({"ask": resp["ask_message"], "tell": resp["tell_message"]})
-        found = resp.get("found", [])
-        if not found:
-            log.warning("SPOP   │ Reference city %r not found anywhere — cannot build buffer", ref_city)
-            t1 = t2 = t3 = time.perf_counter()
-            total_ms = (t3 - t0) * 1000
-            log_evaluation_metrics({
-                "request_id": request_id, "timestamp": timestamp, "query": raw_query,
-                "query_type": "SPATIAL_RELATIONSHIP_BUFFER",
-                "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens, "classify_model": params.classify_model, "extract_model": params.extract_model,
-                "extracted_data": params.extracted_data,
-                "local_resolution": {
-                    "reference_city": ref_city, "distance_km": distance_km,
-                    "note": "reference city not held locally, and not found on the peer either",
-                    "sql_queries": sql_queries,
-                },
-                "kqml_exchanges": kqml_exchanges,
-                "phase1_ms": (t1-t0)*1000, "phase2_ms": 0.0, "phase3_ms": 0.0, "total_ms": total_ms,
-                "tokens_agent1": tokens_agent1, "tokens_agent2": 0, "tokens_total": tokens_agent1,
-                "total_records": 0, "total_data_points": 0, "present_data_points": 0,
-                "missing_data_points": 0, "complete_records": 0, "partial_records": 0,
-                "empty_records": 0, "status": response_status(has_found=False, has_missing=True),
-            })
-            return {
-                "request_id": request_id, "status": response_status(has_found=False, has_missing=True),
-                "query": {"raw": raw_query, "type": "SPATIAL_RELATIONSHIP_BUFFER",
-                          "reference_city": ref_city, "distance_km": distance_km},
-                "cities": [],
-                "summary": {"total": 0, "found": 0},
-                "performance": {"phase1_ms": round((t1-t0)*1000, 1), "phase2_ms": 0, "phase3_ms": 0,
-                                "total_ms": round(total_ms, 1),
-                                "tokens": {"agent_1": tokens_agent1, "agent_2": 0, "total": tokens_agent1}},
-            }
-        fg = found[0]
-        buffer = buffer_from_point(fg.geometry, fg.srid, distance_km, queries=sql_queries)
-        buffer["ref_name"] = fg.spatial_entity
-        ref_source = "Agent-2"
-        kqml_turns = 1
+    cities = sorted(
+        [{"city_name": c.entity_name, "wkt": c.wkt, "srid": c.srid, "source": c.source} for c in local + remote],
+        key=lambda c: c["city_name"],
+    )
 
-    ref_name = buffer["ref_name"]
-    wkt, srid = buffer["wkt"], buffer["srid"]
+    total_ms  = (time.perf_counter() - t0) * 1000
+    phase1_ms = exchange.local_ms
+    phase2_ms = exchange.peer_ms
+    phase3_ms = max(total_ms - phase1_ms - phase2_ms, 0.0)
 
-    t1 = time.perf_counter()
-
-    # ── Test our own catalogue first ───────────────────────────────────────────
-    local_matches = cities_within_buffer(wkt, srid, exclude=[ref_name], queries=sql_queries)
-    log.info("SPOP   │ Local catalogue matches: %d", len(local_matches))
-
-    # ── Send the buffer to Agent-2 to test its own catalogue ──────────────────
-    remote_matches = []
-    exclude = [ref_name] + [fg.spatial_entity for fg in local_matches]
-    try:
-        resp = send_kqml_city_buffer_ask(wkt, srid, exclude)
-        remote_matches = resp.get("found", [])
-        kqml_turns = 1
-        if "ask_message" in resp and "tell_message" in resp:
-            kqml_exchanges.append({"ask": resp["ask_message"], "tell": resp["tell_message"]})
-        log.info("SPOP   │ Agent-2 catalogue matches: %d", len(remote_matches))
-    except Exception as exc:
-        log.warning("SPOP   │ Agent-2 unreachable — %s", exc)
-
-    t2 = time.perf_counter()
-
-    cities = [
-        {"city_name": fg.spatial_entity, "wkt": fg.geometry, "srid": fg.srid, "source": "Agent-1"}
-        for fg in local_matches
-    ] + [
-        {"city_name": fg.spatial_entity, "wkt": fg.geometry, "srid": fg.srid, "source": "Agent-2"}
-        for fg in remote_matches
-    ]
-    cities.sort(key=lambda c: c["city_name"])
-
-    t3 = time.perf_counter()
-    phase1_ms = (t1 - t0) * 1000
-    phase2_ms = (t2 - t1) * 1000
-    phase3_ms = (t3 - t2) * 1000
-    total_ms  = (t3 - t0) * 1000
-
-    status = response_status(has_found=bool(cities), has_missing=not cities)
+    if ref is None:
+        log.warning("SPOP   │ Reference city %r held by neither agent — no zone can be built", params.spatial[0])
+    status = response_status(has_found=bool(cities), has_missing=ref is None or not cities)
 
     log.info(SEPARATOR)
-    log.info("DONE   │ [%s] spatial-operation status=%s  found=%d  %.0f ms",
-             request_id, status, len(cities), total_ms)
+    log.info("DONE   │ [%s] buffer status=%s  found=%d  %.0f ms", request_id, status, len(cities), total_ms)
     log.info(SEPARATOR)
 
     log_evaluation_metrics({
         "request_id": request_id, "timestamp": timestamp, "query": raw_query,
         "query_type": "SPATIAL_RELATIONSHIP_BUFFER",
-        "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens, "classify_model": params.classify_model, "extract_model": params.extract_model,
+        "classify_tokens": params.classify_tokens, "extract_tokens": params.extract_tokens,
+        "classify_model": params.classify_model, "extract_model": params.extract_model,
         "extracted_data": params.extracted_data,
         "local_resolution": {
-            "reference_city":     ref_name,
-            "reference_source":   ref_source,
-            "distance_km":        distance_km,
-            "local_catalogue_matches": len(local_matches),
-            "note": "candidate cities cannot be named in advance — a buffer zone is built "
-                    "once, tested against this agent's own catalogue, then sent to the peer "
-                    "as a :spatial-query to test its catalogue too",
+            "reference_city":   ref.entity_name if ref else params.spatial[0],
+            "reference_source": ref.source if ref else "not_found",
+            "distance_km":      distance_km,
+            "local_catalogue_matches": len(local),
+            "note": "the matching cities cannot be named in advance — the zone is built once, "
+                    "tested against this agent's cities, then sent to Agent-2 to test its own",
             "sql_queries": sql_queries,
         },
-        "kqml_exchanges": kqml_exchanges,
+        "kqml_exchanges": exchange.messages,
         "phase1_ms": phase1_ms, "phase2_ms": phase2_ms, "phase3_ms": phase3_ms, "total_ms": total_ms,
-        "tokens_agent1": tokens_agent1, "tokens_agent2": tokens_agent2,
-        "tokens_total": tokens_agent1 + tokens_agent2,
+        "tokens_agent1": tokens_agent1, "tokens_agent2": exchange.tokens_agent2,
+        "tokens_total": tokens_agent1 + exchange.tokens_agent2,
         "total_records": len(cities), "total_data_points": len(cities),
         "present_data_points": len(cities), "missing_data_points": 0,
         "complete_records": len(cities), "partial_records": 0, "empty_records": 0,
@@ -1113,28 +849,19 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
         "request_id": request_id,
         "status":     status,
         "query": {
-            "raw":            raw_query,
-            "type":           "SPATIAL_RELATIONSHIP_BUFFER",
-            "reference_city": ref_name,
-            "reference_source": ref_source,
-            "distance_km":    distance_km,
+            "raw":              raw_query,
+            "type":             "SPATIAL_RELATIONSHIP_BUFFER",
+            "reference_city":   ref.entity_name if ref else params.spatial[0],
+            "reference_source": ref.source if ref else "not_found",
+            "distance_km":      distance_km,
         },
         "cities": cities,
-        "summary": {
-            "total": len(cities),
-            "from_agent_1": len(local_matches),
-            "from_agent_2": len(remote_matches),
-        },
+        "summary": {"total": len(cities), "from_agent_1": len(local), "from_agent_2": len(remote)},
         "performance": {
-            "phase1_ms": round(phase1_ms, 1),
-            "phase2_ms": round(phase2_ms, 1),
-            "phase3_ms": round(phase3_ms, 1),
-            "total_ms":  round(total_ms, 1),
-            "tokens": {
-                "agent_1": tokens_agent1,
-                "agent_2": tokens_agent2,
-                "total":   tokens_agent1 + tokens_agent2,
-            },
+            "phase1_ms": round(phase1_ms, 1), "phase2_ms": round(phase2_ms, 1),
+            "phase3_ms": round(phase3_ms, 1), "total_ms": round(total_ms, 1),
+            "tokens": {"agent_1": tokens_agent1, "agent_2": exchange.tokens_agent2,
+                       "total": tokens_agent1 + exchange.tokens_agent2},
         },
     }
 

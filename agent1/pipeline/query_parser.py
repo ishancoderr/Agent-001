@@ -1,7 +1,8 @@
 """
 Step 1 — natural language in, QueryParams out.
 
-This module only sequences the pipeline; each step lives in its own class:
+pipeline_main.run() sequences the steps; this module holds the last one
+(QueryParamsBuilder):
 
     raw query
       -> CleanQuery       clean_query.py         names rewritten to their DB spelling
@@ -25,15 +26,11 @@ See query_controller.py's dispatch on params.query_type.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import openai
 from dotenv import load_dotenv
 
-from .query_classifier import QueryClassifier
-from .clean_query import CleanQuery
 from .query_extractor import QueryExtractor
 from .gazetteer import GERMAN_STATES  # re-exported: query_controller imports it from here
 from .query_params import (QueryParams,
@@ -85,7 +82,7 @@ def _years_from(data: Dict[str, Any]) -> List[int]:
     reaches this function empty is genuinely unspecified). The caller decides
     whether that empty list is fatal: harmless for a pure spatial question,
     but an incomplete request wherever attributes were actually asked for -
-    see the "no year, but data was requested" check in parse_query()."""
+    see the "no year, but data was requested" check in build()."""
     raw = data.get("temporal", [])
     if not isinstance(raw, list):
         raw = [raw]
@@ -118,61 +115,11 @@ def _attributes_from(data: Dict[str, Any], query_type: str, entity_type: str) ->
     return attributes
 
 
-def parse_query(query: str, model: str | None = None) -> Tuple[QueryParams, int]:
-    """Returns (QueryParams, tokens_consumed).
-
-    `model` overrides both the classify and extract stages for this one call
-    (the caller — see query_controller.py's UserQuery.model — asked for a
-    specific model). Leave it None to use each stage's own default, which is
-    CLASSIFY_MODEL/EXTRACT_MODEL — themselves overridable per deployment via
-    the env vars of the same name, not a per-request choice.
-
-    This function only sequences clean -> classify -> extract -> shape; the
-    shaping step (turning the raw extracted fields into a validated
-    QueryParams, including the malformed-extraction fallbacks) is
-    QueryParamsBuilder.build() below, kept separate so pipeline_main.py —
-    which drives clean/classify/extract itself, one call at a time, for
-    visibility — can shape its own already-extracted `data` the exact same
-    way this function does, without a second, redundant classify+extract
-    round trip."""
-    original_query = query
-    log.info("       | Input (raw)     : %r", query)
-    query = CleanQuery(query).cleaned
-    log.info("       | Input (cleaned) : %r", query)
-
-    client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    classifier = QueryClassifier(client, model=model) if model else QueryClassifier(client)
-    extractor = QueryExtractor(client, model=model) if model else QueryExtractor(client)
-
-    query_type, tokens_classify = classifier.classify(query)
-    log.info("       | STEP 1a | Classified as: %s", query_type)
-
-    # ── Unrelated — refuse before spending an extraction call ────────────────
-    if query_type == "UNRELATED":
-        log.info("       | UNRELATED query - rejecting without an extraction call")
-        return QueryParams(
-            query_type="UNRELATED", spatial=[], temporal=[], attributes=[],
-            raw_query=original_query, classify_tokens=tokens_classify,
-            extract_tokens=0, extracted_data={}, classify_model=classifier.model,
-        ), tokens_classify
-
-    data, tokens_extract = extractor.extract(query, query_type)
-    tokens_consumed = tokens_classify + tokens_extract
-
-    return QueryParamsBuilder(extractor).build(
-        cleaned_query=query, query_type=query_type, data=data,
-        original_query=original_query, tokens_classify=tokens_classify,
-        tokens_consumed=tokens_consumed, classify_model=classifier.model,
-    )
-
-
 class QueryParamsBuilder:
     """Turns one extract() call's raw fields into a validated QueryParams.
 
-    Split out of parse_query() so a caller that already has `data` in hand
-    (parse_query() itself, or pipeline_main.py driving QueryExtractor
-    directly) reaches the same result through the same code, including the
-    malformed-extraction fallbacks in build(), which call `extractor` again."""
+    Includes the malformed-extraction fallbacks in build(), which call
+    `extractor` again."""
 
     def __init__(self, extractor: QueryExtractor):
         self.extractor = extractor
@@ -274,7 +221,7 @@ class QueryParamsBuilder:
         # relationship types are inherently about states specifically (a
         # fact about what those categories mean, not something extracted),
         # so entity_type stays unset for them and agent1/retrieval/
-        # local_store.py never looks at it there either. Validated against
+        # gap_detector.py falls back to the default. Validated against
         # VALID_ENTITY_TYPES the same way GEOMETRY_LOOKUP's own entities are
         # (_sanitize_entities above) — an untrusted model output, not
         # assumed correct just because it parsed as a string. Determined

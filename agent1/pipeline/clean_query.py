@@ -8,7 +8,7 @@ name_aliases.yaml.
 Doing this once, up front, means _classify() and _extract() only ever see
 canonical names — the LLM's job becomes "copy this name" rather than
 "invent the right spelling", which is far more reliable. It also means
-parse_query() does not need to repeat entity-name cleanup after every
+the parser does not need to repeat entity-name cleanup after every
 extraction branch: clean the query once, here, and every downstream step
 inherits clean names.
 """

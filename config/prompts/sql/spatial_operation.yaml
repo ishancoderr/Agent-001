@@ -1,0 +1,65 @@
+# SqlWriter prompt for SPATIAL_OPERATION (Scenarios 13-16, plus the named-
+# target buffer test) — see agent1/retrieval/sql_writer.py.
+#
+# Runs only after every input shape is present (fetched locally or supplied
+# by Agent-2) and their SRIDs agree. The operation is never missing, only an
+# input can be (Section 3.5).
+
+version: 1
+
+steps:
+
+  compute:
+    task: 'Combine the two given shapes with the requested operation and
+      return the resulting shape. Union = ST_Union, Intersection =
+      ST_Intersection, Difference = ST_Difference (the first shape minus the
+      second; the order matters), SymDifference = ST_SymDifference. Build
+      each shape with ST_GeomFromText(wkt, srid).'
+
+    placeholders:
+      wkt_a:  'text — WKT of the first shape'
+      srid_a: 'int — SRID of the first shape'
+      wkt_b:  'text — WKT of the second shape'
+      srid_b: 'int — SRID of the second shape'
+
+    columns: 'wkt (ST_AsText of the result).'
+
+    examples:
+      - input:
+          question: "Give me one combined boundary for Bayern and Sachsen."
+          operation: Union
+          spatial: ["Bayern", "Sachsen"]
+        output:
+          sql: "SELECT ST_AsText(ST_Union(ST_GeomFromText(:wkt_a, :srid_a), ST_GeomFromText(:wkt_b, :srid_b))) AS wkt"
+
+      - input:
+          question: "Give me Brandenburg with Berlin removed."
+          operation: Difference
+          spatial: ["Brandenburg", "Berlin"]
+        output:
+          sql: "SELECT ST_AsText(ST_Difference(ST_GeomFromText(:wkt_a, :srid_a), ST_GeomFromText(:wkt_b, :srid_b))) AS wkt"
+
+  buffer_within:
+    task: 'Build a zone of :dist_m metres around the reference shape (cast it
+      to geography, buffer, cast back to geometry) and test every target
+      against it with ST_Intersects. Return a three-valued result per target:
+      -1 when the target shape is NULL, 1 when it meets the zone, 0 otherwise.
+      Turn the two target arrays into rows with unnest().'
+
+    placeholders:
+      ref_wkt:  'text — WKT of the reference shape'
+      ref_srid: 'int — SRID of the reference shape'
+      dist_m:   'float — zone width in metres'
+      names:    'text[] — target names, parallel to :wkts'
+      wkts:     'text[] — target WKT, parallel to :names'
+
+    columns: 'entity_name, meets_zone (-1, 0 or 1).'
+
+    examples:
+      - input:
+          question: "Which of Nordrhein-Westfalen and Niedersachsen lie within 100 km of Dortmund?"
+          operation: BufferWithin
+          spatial: ["Dortmund", "Nordrhein-Westfalen", "Niedersachsen"]
+          distance_km: 100
+        output:
+          sql: "WITH targets(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(n, w)), zone(g) AS (SELECT ST_Buffer(ST_GeomFromText(:ref_wkt, :ref_srid)::geography, :dist_m)::geometry) SELECT targets.entity_name AS entity_name, CASE WHEN targets.shape IS NULL THEN -1 WHEN ST_Intersects(targets.shape, zone.g) THEN 1 ELSE 0 END AS meets_zone FROM targets, zone"
