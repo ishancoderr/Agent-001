@@ -1,8 +1,0 @@
-# For finetune/train_qlora.py on a GPU machine (e.g. AWS g4dn.xlarge, NVIDIA T4).
-# torch comes with the AWS Deep Learning AMI; install it separately elsewhere.
-# transformers is kept below 5.0: the script uses the 4.x training API, and
-# 4.56 is the first release that takes `dtype=` (Qwen3 itself needs 4.51+).
-transformers>=4.56,<5.0
-peft>=0.13
-bitsandbytes>=0.43
-accelerate>=0.34

@@ -1,5 +1,9 @@
 # Fine-tuning questions, version 1 — 120 questions.
 #
+# Written by hand: drafted with Claude Code in October 2026 following the plan
+# in HOW_TO_WRITE_QUESTIONS.md, to be reviewed by the thesis author. That guide
+# explains every field, the format per category and how to add questions.
+#
 #   group          classify label(s)                                  count
 #   data           DIRECT_LOOKUP (2 of them end as NEEDS_YEAR)           22
 #   geometry       GEOMETRY_LOOKUP                                       22
