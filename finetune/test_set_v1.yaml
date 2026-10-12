@@ -1,0 +1,264 @@
+# Test set, version 1 — 109 questions for comparing the six models.
+#
+#   NEVER TRAIN ON THIS FILE. It is not read by build_examples.py by default,
+#   no question here appears in questions_v1.yaml or questions_v2.yaml, and it
+#   must stay that way — otherwise the test measures memory, not ability.
+#
+# Used to compare all six models (GPT-4o mini, GPT-4, Claude Haiku, Claude
+# Opus, Qwen3-8B, Qwen3-8B + QLoRA) on the same questions. Every entry has the
+# same format as the training files, so the expected category and the expected
+# extraction can be checked automatically; the final data or shapes an agent
+# returns depend on the databases and are confirmed by hand, as the Evaluation
+# Method describes. The twenty scenario questions (Data_Missingness_Scenarios_V18)
+# are a separate test and are not repeated here.
+#
+#   category                       count   ids
+#   DIRECT_LOOKUP                     13   td01–td13  (td12, td13 must end as NEEDS_YEAR)
+#   GEOMETRY_LOOKUP                   13   tg01–tg13
+#   SPATIAL_OPERATION                 18   to01–to18  (to11–to13 BufferWithin; to14–to18
+#                                                  merge states, then the cities inside)
+#   SPATIAL_RELATIONSHIP_BUFFER       17   tb01–tb17  (tb14–tb17 cities inside one state)
+#   SPATIAL_ADJACENCY                 12   ta01–ta12
+#   SPATIAL_DIRECTION                 12   tr01–tr12
+#   SPATIAL_DISTANCE                  12   ts01–ts12
+#   UNRELATED                         12   tu01–tu12
+#                                    ---
+#                                    109
+#
+# Written with Claude Code in October 2026; to be reviewed by the thesis author.
+# Years are mostly 1990–2019 (what the agents' databases hold); a few later years
+# test the not-found outcome. City names come from the agents' cities table.
+# Labels follow the same rules as the training files (HOW_TO_WRITE_QUESTIONS.md).
+
+# ══ DIRECT_LOOKUP ════════════════════════════════════════════════════════════
+
+- {id: td01, category: DIRECT_LOOKUP, question: "What was the population of Sachsen-Anhalt in 2005?",
+   extract: {spatial: [Sachsen-Anhalt], temporal: [2005], attributes: [population], entity_type: state}}
+- {id: td02, category: DIRECT_LOOKUP, question: "Show live births in Mecklenburg-Vorpommern and Brandenburg for 2010",
+   extract: {spatial: [Mecklenburg-Vorpommern, Brandenburg], temporal: [2010], attributes: [live_births], entity_type: state}}
+- {id: td03, category: DIRECT_LOOKUP, question: "How many weddings took place in Saarland between 2012 and 2015?",
+   extract: {spatial: [Saarland], temporal: [2012, 2013, 2014, 2015], attributes: [marriages], entity_type: state}}
+- {id: td04, category: DIRECT_LOOKUP, question: "Population, marriages and births for Thüringen in 1998",
+   extract: {spatial: [Thüringen], temporal: [1998], attributes: [population, marriages, live_births], entity_type: state}}
+- {id: td05, category: DIRECT_LOOKUP, question: "inhabitants of schleswig holstein 2017",
+   extract: {spatial: [Schleswig-Holstein], temporal: [2017], attributes: [population], entity_type: state}}
+- {id: td06, category: DIRECT_LOOKUP, question: "Give me the number of births in every federal state in 2016",
+   extract: {spatial: all, temporal: [2016], attributes: [live_births], entity_type: state}}
+- {id: td07, category: DIRECT_LOOKUP, question: "How did the population of Hessen change from 2000 to 2004?",
+   extract: {spatial: [Hessen], temporal: [2000, 2001, 2002, 2003, 2004], attributes: [population], entity_type: state}}
+- {id: td08, category: DIRECT_LOOKUP, names_translated: true, question: "Marriage figures for Rhineland-Palatinate in 2008",
+   extract: {spatial: [Rheinland-Pfalz], temporal: [2008], attributes: [marriages], entity_type: state}}
+- {id: td09, category: DIRECT_LOOKUP, question: "Population of Berlin, Brandenburg and Sachsen in 2019",
+   extract: {spatial: [Berlin, Brandenburg, Sachsen], temporal: [2019], attributes: [population], entity_type: state}}
+- {id: td10, category: DIRECT_LOOKUP, names_translated: true, question: "How many children were born in North Rhine-Westphalia in 2014?",
+   extract: {spatial: [Nordrhein-Westfalen], temporal: [2014], attributes: [live_births], entity_type: state}}
+- {id: td11, category: DIRECT_LOOKUP, question: "Compare marriages in Bayern and Hamburg in 1995 and 2015",
+   extract: {spatial: [Bayern, Hamburg], temporal: [1995, 2015], attributes: [marriages], entity_type: state}}
+- {id: td12, category: DIRECT_LOOKUP, expect: NEEDS_YEAR, question: "Population figures for Mecklenburg-Vorpommern please",
+   extract: {spatial: [Mecklenburg-Vorpommern], temporal: [], attributes: [population], entity_type: state}}
+- {id: td13, category: DIRECT_LOOKUP, expect: NEEDS_YEAR, question: "Tell me the number of live births in Thüringen",
+   extract: {spatial: [Thüringen], temporal: [], attributes: [live_births], entity_type: state}}
+
+# ══ GEOMETRY_LOOKUP ══════════════════════════════════════════════════════════
+
+- {id: tg01, category: GEOMETRY_LOOKUP, question: "Show me the boundary of Sachsen-Anhalt",
+   extract: {entities: [{entity_name: Sachsen-Anhalt, entity_type: state}]}}
+- {id: tg02, category: GEOMETRY_LOOKUP, question: "What are the coordinates of Würzburg?",
+   extract: {entities: [{entity_name: Würzburg, entity_type: city}]}}
+- {id: tg03, category: GEOMETRY_LOOKUP, question: "Give me the polygon of Brandenburg and the point of Potsdam",
+   extract: {entities: [{entity_name: Brandenburg, entity_type: state}, {entity_name: Potsdam, entity_type: city}]}}
+- {id: tg04, category: GEOMETRY_LOOKUP, question: "WKT geometry for Saarbrücken and Trier",
+   extract: {entities: [{entity_name: Saarbrücken, entity_type: city}, {entity_name: Trier, entity_type: city}]}}
+- {id: tg05, category: GEOMETRY_LOOKUP, question: "outline of nordrhein westfalen",
+   extract: {entities: [{entity_name: Nordrhein-Westfalen, entity_type: state}]}}
+- {id: tg06, category: GEOMETRY_LOOKUP, question: "Where is Regensburg on the map?",
+   extract: {entities: [{entity_name: Regensburg, entity_type: city}]}}
+- {id: tg07, category: GEOMETRY_LOOKUP, question: "Shapes of Hamburg, Bremen and Berlin",
+   extract: {entities: [{entity_name: Hamburg, entity_type: state}, {entity_name: Bremen, entity_type: state}, {entity_name: Berlin, entity_type: state}]}}
+- {id: tg08, category: GEOMETRY_LOOKUP, question: "Point geometry of the city of Berlin",
+   extract: {entities: [{entity_name: Berlin, entity_type: city}]}}
+- {id: tg09, category: GEOMETRY_LOOKUP, question: "Boundary polygons of Hessen, Thüringen and Bayern",
+   extract: {entities: [{entity_name: Hessen, entity_type: state}, {entity_name: Thüringen, entity_type: state}, {entity_name: Bayern, entity_type: state}]}}
+- {id: tg10, category: GEOMETRY_LOOKUP, question: "Centroid of Kiel and Lübeck",
+   extract: {entities: [{entity_name: Kiel, entity_type: city}, {entity_name: Lübeck, entity_type: city}]}}
+- {id: tg11, category: GEOMETRY_LOOKUP, question: "Geometry of Nordrhein-Westfalen and the city of Essen",
+   extract: {entities: [{entity_name: Nordrhein-Westfalen, entity_type: state}, {entity_name: Essen, entity_type: city}]}}
+- {id: tg12, category: GEOMETRY_LOOKUP, names_translated: true, question: "I need the shape of Bavaria",
+   extract: {entities: [{entity_name: Bayern, entity_type: state}]}}
+- {id: tg13, category: GEOMETRY_LOOKUP, question: "Coordinates of Chemnitz, Zwickau and Plauen",
+   extract: {entities: [{entity_name: Chemnitz, entity_type: city}, {entity_name: Zwickau, entity_type: city}, {entity_name: Plauen, entity_type: city}]}}
+
+# ══ SPATIAL_OPERATION ════════════════════════════════════════════════════════
+
+- {id: to01, category: SPATIAL_OPERATION, question: "Merge Mecklenburg-Vorpommern and Brandenburg into one shape",
+   extract: {operation: Union, spatial: [Mecklenburg-Vorpommern, Brandenburg], entity_type: state, distance_km: null}}
+- {id: to02, category: SPATIAL_OPERATION, question: "Union of Saarland, Rheinland-Pfalz and Hessen",
+   extract: {operation: Union, spatial: [Saarland, Rheinland-Pfalz, Hessen], entity_type: state, distance_km: null}}
+- {id: to03, category: SPATIAL_OPERATION, question: "Which area do Thüringen and Sachsen-Anhalt share?",
+   extract: {operation: Intersection, spatial: [Thüringen, Sachsen-Anhalt], entity_type: state, distance_km: null}}
+- {id: to04, category: SPATIAL_OPERATION, question: "Overlap of Niedersachsen and Schleswig-Holstein",
+   extract: {operation: Intersection, spatial: [Niedersachsen, Schleswig-Holstein], entity_type: state, distance_km: null}}
+- {id: to05, category: SPATIAL_OPERATION, question: "Show Nordrhein-Westfalen with Rheinland-Pfalz subtracted",
+   extract: {operation: Difference, spatial: [Nordrhein-Westfalen, Rheinland-Pfalz], entity_type: state, distance_km: null}}
+- {id: to06, category: SPATIAL_OPERATION, question: "Remove Thüringen from Bayern",
+   extract: {operation: Difference, spatial: [Bayern, Thüringen], entity_type: state, distance_km: null}}
+- {id: to07, category: SPATIAL_OPERATION, question: "Symmetric difference of Hessen and Nordrhein-Westfalen",
+   extract: {operation: SymDifference, spatial: [Hessen, Nordrhein-Westfalen], entity_type: state, distance_km: null}}
+- {id: to08, category: SPATIAL_OPERATION, question: "Which parts are in either Brandenburg or Sachsen but not both?",
+   extract: {operation: SymDifference, spatial: [Brandenburg, Sachsen], entity_type: state, distance_km: null}}
+- {id: to09, category: SPATIAL_OPERATION, question: "Join Hamburg and Schleswig-Holstein into a single region",
+   extract: {operation: Union, spatial: [Hamburg, Schleswig-Holstein], entity_type: state, distance_km: null}}
+- {id: to10, category: SPATIAL_OPERATION, question: "Combine the areas of Bremen and Hamburg",
+   extract: {operation: Union, spatial: [Bremen, Hamburg], entity_type: state, distance_km: null}}
+- {id: to11, category: SPATIAL_OPERATION, question: "Which of Hessen, Bayern and Thüringen lie within 70 km of Würzburg?",
+   extract: {operation: BufferWithin, spatial: [Würzburg, Hessen, Bayern, Thüringen], entity_type: state, distance_km: 70}}
+- {id: to12, category: SPATIAL_OPERATION, question: "Which of Brandenburg and Mecklenburg-Vorpommern are within 90 km of Berlin?",
+   extract: {operation: BufferWithin, spatial: [Berlin, Brandenburg, Mecklenburg-Vorpommern], entity_type: state, distance_km: 90}}
+- {id: to13, category: SPATIAL_OPERATION, question: "Of Saarland and Rheinland-Pfalz, which lie within 40 km of Trier?",
+   extract: {operation: BufferWithin, spatial: [Trier, Saarland, Rheinland-Pfalz], entity_type: state, distance_km: 40}}
+
+- {id: to14, category: SPATIAL_OPERATION, question: "Merge Hessen and Thüringen. Which cities lie inside the merged area?",
+   extract: {operation: Union, spatial: [Hessen, Thüringen], entity_type: state, distance_km: null, target_entity: city}}
+- {id: to15, category: SPATIAL_OPERATION, question: "Which cities are inside the union of Saarland and Rheinland-Pfalz?",
+   extract: {operation: Union, spatial: [Saarland, Rheinland-Pfalz], entity_type: state, distance_km: null, target_entity: city}}
+- {id: to16, category: SPATIAL_OPERATION, question: "Combine Hamburg and Niedersachsen and list the cities within that area",
+   extract: {operation: Union, spatial: [Hamburg, Niedersachsen], entity_type: state, distance_km: null, target_entity: city}}
+- {id: to17, category: SPATIAL_OPERATION, question: "After joining Sachsen and Sachsen-Anhalt into one region, which cities does it contain?",
+   extract: {operation: Union, spatial: [Sachsen, Sachsen-Anhalt], entity_type: state, distance_km: null, target_entity: city}}
+- {id: to18, category: SPATIAL_OPERATION, question: "List the cities that lie in Bayern or Hessen",
+   extract: {operation: Union, spatial: [Bayern, Hessen], entity_type: state, distance_km: null, target_entity: city}}
+
+# ══ SPATIAL_RELATIONSHIP_BUFFER ══════════════════════════════════════════════
+
+- {id: tb01, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities are within 40 km of Regensburg?",
+   extract: {spatial: [Regensburg], operations: [Buffer, Within], distance_km: 40, target_entity: city}}
+- {id: tb02, category: SPATIAL_RELATIONSHIP_BUFFER, question: "List the cities within 60 km of Osnabrück",
+   extract: {spatial: [Osnabrück], operations: [Buffer, Within], distance_km: 60, target_entity: city}}
+- {id: tb03, category: SPATIAL_RELATIONSHIP_BUFFER, question: "What cities lie close to Heidelberg?",
+   extract: {spatial: [Heidelberg], operations: [Buffer, Within], distance_km: 100, target_entity: city}}
+- {id: tb04, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Cities within 25 kilometres of Göttingen",
+   extract: {spatial: [Göttingen], operations: [Buffer, Within], distance_km: 25, target_entity: city}}
+- {id: tb05, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Find all towns in a 50 km radius around Chemnitz",
+   extract: {spatial: [Chemnitz], operations: [Buffer, Within], distance_km: 50, target_entity: city}}
+- {id: tb06, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities are no more than 35 km from Lübeck?",
+   extract: {spatial: [Lübeck], operations: [Buffer, Within], distance_km: 35, target_entity: city}}
+- {id: tb07, category: SPATIAL_RELATIONSHIP_BUFFER, question: "cities near Saarbrücken within 30km",
+   extract: {spatial: [Saarbrücken], operations: [Buffer, Within], distance_km: 30, target_entity: city}}
+- {id: tb08, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities are within 80 km of Ulm?",
+   extract: {spatial: [Ulm], operations: [Buffer, Within], distance_km: 80, target_entity: city}}
+- {id: tb09, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Show me every city within 45 km of Paderborn",
+   extract: {spatial: [Paderborn], operations: [Buffer, Within], distance_km: 45, target_entity: city}}
+- {id: tb10, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities lie within 15 km of Aachen?",
+   extract: {spatial: [Aachen], operations: [Buffer, Within], distance_km: 15, target_entity: city}}
+- {id: tb11, category: SPATIAL_RELATIONSHIP_BUFFER, question: "What cities can be reached within 70 km of Schwerin?",
+   extract: {spatial: [Schwerin], operations: [Buffer, Within], distance_km: 70, target_entity: city}}
+- {id: tb12, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Cities around Bielefeld, 55 km",
+   extract: {spatial: [Bielefeld], operations: [Buffer, Within], distance_km: 55, target_entity: city}}
+- {id: tb13, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities are within 100 km of Jena?",
+   extract: {spatial: [Jena], operations: [Buffer, Within], distance_km: 100, target_entity: city}}
+# cities inside ONE place (distance_km 0)
+- {id: tb14, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities are inside Mecklenburg-Vorpommern?",
+   extract: {spatial: [Mecklenburg-Vorpommern], operations: [Buffer, Within], distance_km: 0, target_entity: city}}
+- {id: tb15, category: SPATIAL_RELATIONSHIP_BUFFER, names_translated: true, question: "Name the cities in Rhineland-Palatinate",
+   extract: {spatial: [Rheinland-Pfalz], operations: [Buffer, Within], distance_km: 0, target_entity: city}}
+- {id: tb16, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities belong to the area of Bremen?",
+   extract: {spatial: [Bremen], operations: [Buffer, Within], distance_km: 0, target_entity: city}}
+- {id: tb17, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities lie within 15 km of Sachsen-Anhalt?",
+   extract: {spatial: [Sachsen-Anhalt], operations: [Buffer, Within], distance_km: 15, target_entity: city}}
+
+# ══ SPATIAL_ADJACENCY ════════════════════════════════════════════════════════
+
+- {id: ta01, category: SPATIAL_ADJACENCY, question: "Which states border Sachsen-Anhalt?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: adjacency, subject: null, refs: [Sachsen-Anhalt], distance_km: null}}}
+- {id: ta02, category: SPATIAL_ADJACENCY, question: "Does Hessen share a border with Bayern?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: adjacency, subject: Hessen, refs: [Bayern], distance_km: null}}}
+- {id: ta03, category: SPATIAL_ADJACENCY, question: "Is Saarland next to Hessen?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: adjacency, subject: Saarland, refs: [Hessen], distance_km: null}}}
+- {id: ta04, category: SPATIAL_ADJACENCY, question: "Neighbours of Brandenburg",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: adjacency, subject: null, refs: [Brandenburg], distance_km: null}}}
+- {id: ta05, category: SPATIAL_ADJACENCY, question: "Which state touches both Niedersachsen and Sachsen-Anhalt?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: adjacency, subject: null, refs: [Niedersachsen, Sachsen-Anhalt], distance_km: null}}}
+- {id: ta06, category: SPATIAL_ADJACENCY, question: "Do Mecklenburg-Vorpommern and Schleswig-Holstein share a border?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: adjacency, subject: Mecklenburg-Vorpommern, refs: [Schleswig-Holstein], distance_km: null}}}
+- {id: ta07, category: SPATIAL_ADJACENCY, question: "Which states are adjacent to Rheinland-Pfalz?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: adjacency, subject: null, refs: [Rheinland-Pfalz], distance_km: null}}}
+- {id: ta08, category: SPATIAL_ADJACENCY, question: "Does Berlin border Sachsen?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: adjacency, subject: Berlin, refs: [Sachsen], distance_km: null}}}
+- {id: ta09, category: SPATIAL_ADJACENCY, question: "Which states share a border with Nordrhein-Westfalen, and what was their population in 2010?",
+   extract: {spatial: all, temporal: [2010], attributes: [population], spatial_relationship: {type: adjacency, subject: null, refs: [Nordrhein-Westfalen], distance_km: null}}}
+- {id: ta10, category: SPATIAL_ADJACENCY, question: "Neighbouring states of Bayern with their live births from 2015 to 2017",
+   extract: {spatial: all, temporal: [2015, 2016, 2017], attributes: [live_births], spatial_relationship: {type: adjacency, subject: null, refs: [Bayern], distance_km: null}}}
+- {id: ta11, category: SPATIAL_ADJACENCY, question: "Is Baden-Württemberg a neighbour of Hessen?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: adjacency, subject: Baden-Württemberg, refs: [Hessen], distance_km: null}}}
+- {id: ta12, category: SPATIAL_ADJACENCY, names_translated: true, question: "Which states border Bavaria?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: adjacency, subject: null, refs: [Bayern], distance_km: null}}}
+
+# ══ SPATIAL_DIRECTION ════════════════════════════════════════════════════════
+
+- {id: tr01, category: SPATIAL_DIRECTION, question: "Which states lie north of Hessen?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: north_of, subject: null, refs: [Hessen], distance_km: null}}}
+- {id: tr02, category: SPATIAL_DIRECTION, question: "Is Bremen west of Hamburg?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: west_of, subject: Bremen, refs: [Hamburg], distance_km: null}}}
+- {id: tr03, category: SPATIAL_DIRECTION, question: "States south of Thüringen",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: south_of, subject: null, refs: [Thüringen], distance_km: null}}}
+- {id: tr04, category: SPATIAL_DIRECTION, question: "Does Brandenburg lie east of Niedersachsen?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: east_of, subject: Brandenburg, refs: [Niedersachsen], distance_km: null}}}
+- {id: tr05, category: SPATIAL_DIRECTION, question: "Which states are located west of Sachsen?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: west_of, subject: null, refs: [Sachsen], distance_km: null}}}
+- {id: tr06, category: SPATIAL_DIRECTION, question: "Is Bayern south of Sachsen-Anhalt?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: south_of, subject: Bayern, refs: [Sachsen-Anhalt], distance_km: null}}}
+- {id: tr07, category: SPATIAL_DIRECTION, question: "Which federal states lie east of Hessen?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: east_of, subject: null, refs: [Hessen], distance_km: null}}}
+- {id: tr08, category: SPATIAL_DIRECTION, question: "Is Schleswig-Holstein north of Mecklenburg-Vorpommern?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: north_of, subject: Schleswig-Holstein, refs: [Mecklenburg-Vorpommern], distance_km: null}}}
+- {id: tr09, category: SPATIAL_DIRECTION, question: "States north of Baden-Württemberg and their marriages in 2012",
+   extract: {spatial: all, temporal: [2012], attributes: [marriages], spatial_relationship: {type: north_of, subject: null, refs: [Baden-Württemberg], distance_km: null}}}
+- {id: tr10, category: SPATIAL_DIRECTION, question: "Which states are south of Nordrhein-Westfalen?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: south_of, subject: null, refs: [Nordrhein-Westfalen], distance_km: null}}}
+- {id: tr11, category: SPATIAL_DIRECTION, question: "Does Saarland lie west of Rheinland-Pfalz?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: west_of, subject: Saarland, refs: [Rheinland-Pfalz], distance_km: null}}}
+- {id: tr12, category: SPATIAL_DIRECTION, question: "Which states lie east of Niedersachsen, with their population in 2018?",
+   extract: {spatial: all, temporal: [2018], attributes: [population], spatial_relationship: {type: east_of, subject: null, refs: [Niedersachsen], distance_km: null}}}
+
+# ══ SPATIAL_DISTANCE ═════════════════════════════════════════════════════════
+
+- {id: ts01, category: SPATIAL_DISTANCE, question: "Which states are within 100 km of Kassel?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: null, refs: [Kassel], distance_km: 100}}}
+- {id: ts02, category: SPATIAL_DISTANCE, question: "Is Hessen within 50 km of Würzburg?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: Hessen, refs: [Würzburg], distance_km: 50}}}
+- {id: ts03, category: SPATIAL_DISTANCE, question: "States within 80 km of Hamburg",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: null, refs: [Hamburg], distance_km: 80}}}
+- {id: ts04, category: SPATIAL_DISTANCE, question: "Which states lie within 120 km of Halle?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: null, refs: [Halle], distance_km: 120}}}
+- {id: ts05, category: SPATIAL_DISTANCE, question: "Is Niedersachsen within 30 km of Bremen?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: Niedersachsen, refs: [Bremen], distance_km: 30}}}
+- {id: ts06, category: SPATIAL_DISTANCE, question: "Which states are less than 60 km from Saarbrücken?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: null, refs: [Saarbrücken], distance_km: 60}}}
+- {id: ts07, category: SPATIAL_DISTANCE, question: "States within 150 km of München",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: null, refs: [Munich], distance_km: 150}}}
+- {id: ts08, category: SPATIAL_DISTANCE, question: "Is Thüringen within 40 km of Kassel?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: Thüringen, refs: [Kassel], distance_km: 40}}}
+- {id: ts09, category: SPATIAL_DISTANCE, question: "Which states are within 90 km of Dresden?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: null, refs: [Dresden], distance_km: 90}}}
+- {id: ts10, category: SPATIAL_DISTANCE, question: "Which states lie within 70 km of Mannheim, and what were their marriages in 2016?",
+   extract: {spatial: all, temporal: [2016], attributes: [marriages], spatial_relationship: {type: distance, subject: null, refs: [Mannheim], distance_km: 70}}}
+- {id: ts11, category: SPATIAL_DISTANCE, question: "Is Brandenburg within 20 km of Berlin?",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: Brandenburg, refs: [Berlin], distance_km: 20}}}
+- {id: ts12, category: SPATIAL_DISTANCE, question: "States within 200 km of Kiel",
+   extract: {spatial: all, temporal: [], attributes: [], spatial_relationship: {type: distance, subject: null, refs: [Kiel], distance_km: 200}}}
+
+# ══ UNRELATED ════════════════════════════════════════════════════════════════
+
+- {id: tu01, category: UNRELATED, question: "What is the population of Zurich?"}
+- {id: tu02, category: UNRELATED, question: "Recommend a good book about history"}
+- {id: tu03, category: UNRELATED, question: "How tall is Mount Everest?"}
+- {id: tu04, category: UNRELATED, question: "Which countries border Austria?"}
+- {id: tu05, category: UNRELATED, question: "Convert 100 euros to dollars"}
+- {id: tu06, category: UNRELATED, question: "What time is it in Tokyo?"}
+- {id: tu07, category: UNRELATED, question: "Who wrote Faust?"}
+- {id: tu08, category: UNRELATED, question: "How many people live in Paris and Lyon?"}
+- {id: tu09, category: UNRELATED, question: "Explain how photosynthesis works"}
+- {id: tu10, category: UNRELATED, question: "What is the area of Poland?"}
+- {id: tu11, category: UNRELATED, question: "Give me a recipe for apple strudel"}
+- {id: tu12, category: UNRELATED, question: "Which cities lie within 50 km of Vienna?"}
+

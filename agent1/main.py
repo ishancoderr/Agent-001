@@ -11,6 +11,7 @@ import logging
 from fastapi import FastAPI
 
 from .controller import query_router, kqml_router
+from .messaging.agent_registry import AGENT_NAME
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,7 +21,7 @@ logging.basicConfig(
 
 log = logging.getLogger("agent1")
 
-app = FastAPI(title="Agent 1 – Geospatial Missing Data", version="1.0.0")
+app = FastAPI(title=f"{AGENT_NAME} – Geospatial Missing Data", version="1.0.0")
 
 app.include_router(query_router)
 app.include_router(kqml_router)

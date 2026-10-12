@@ -13,6 +13,8 @@ from typing import Dict, List, Tuple
 
 import yaml
 
+from agent1.settings import OPERATIONS, sector_condition
+
 _SCHEMA = Path(__file__).resolve().parent.parent / "config" / "schema"
 ENTITIES: Dict[str, dict] = yaml.safe_load((_SCHEMA / "entities.yaml").read_text(encoding="utf-8"))["entities"]
 ATTRIBUTE_TABLES: List[dict] = yaml.safe_load(
@@ -70,17 +72,14 @@ def shape_fetch(entity_type: str) -> str:
 
 # ── SPATIAL_OPERATION ───────────────────────────────────────────────────────
 
-_OPERATION_FN = {"Union": "ST_Union", "Intersection": "ST_Intersection",
-                 "Difference": "ST_Difference", "SymDifference": "ST_SymDifference"}
-
-
 def operation(op: str) -> str:
-    return (f"SELECT ST_AsText({_OPERATION_FN[op]}(ST_GeomFromText(:wkt_a, :srid_a), "
+    """The PostGIS function for each operation comes from config/settings.yaml."""
+    return (f"SELECT ST_AsText({OPERATIONS[op]}(ST_GeomFromText(:wkt_a, :srid_a), "
             f"ST_GeomFromText(:wkt_b, :srid_b))) AS wkt")
 
 
 BUFFER_WITHIN = (
-    "WITH targets(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, 4326) FROM unnest(CAST(:names AS text[]), "
+    "WITH targets(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, :cand_srid) FROM unnest(CAST(:names AS text[]), "
     "CAST(:wkts AS text[])) AS t(n, w)), zone(g) AS (SELECT ST_Buffer(ST_GeomFromText(:ref_wkt, :ref_srid)::geography, "
     ":dist_m)::geometry) SELECT targets.entity_name AS entity_name, CASE WHEN targets.shape IS NULL THEN -1 "
     "WHEN ST_Intersects(targets.shape, zone.g) THEN 1 ELSE 0 END AS meets_zone FROM targets, zone")
@@ -88,10 +87,8 @@ BUFFER_WITHIN = (
 
 # ── SPATIAL_RELATIONSHIP (adjacency / direction / distance) ─────────────────
 
-_CANDIDATES = ("WITH cand(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, 4326) FROM unnest(CAST(:names AS text[]), "
+_CANDIDATES = ("WITH cand(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, :cand_srid) FROM unnest(CAST(:names AS text[]), "
                "CAST(:wkts AS text[])) AS t(n, w)), ref(shape) AS (SELECT ST_GeomFromText(:ref_wkt, :ref_srid))")
-_SECTORS = {"north_of": "(bearing.az >= 315 OR bearing.az <= 45)", "east_of": "bearing.az >= 45 AND bearing.az <= 135",
-            "south_of": "bearing.az >= 135 AND bearing.az <= 225", "west_of": "bearing.az >= 225 AND bearing.az <= 315"}
 
 
 def relationship(kind: str) -> str:
@@ -104,7 +101,7 @@ def relationship(kind: str) -> str:
                 f"ORDER BY ST_Distance(cand.shape::geography, ref.shape::geography)")
     return (f"{_CANDIDATES}, bearing(entity_name, az) AS (SELECT cand.entity_name, degrees(ST_Azimuth("
             f"ST_Centroid(ref.shape), ST_Centroid(cand.shape))) FROM cand, ref WHERE cand.entity_name <> :ref) "
-            f"SELECT bearing.entity_name AS entity_name FROM bearing WHERE {_SECTORS[kind]} ORDER BY bearing.az")
+            f"SELECT bearing.entity_name AS entity_name FROM bearing WHERE {sector_condition(kind, 'bearing.az')} ORDER BY bearing.az")
 
 
 # ── SPATIAL_RELATIONSHIP_BUFFER ─────────────────────────────────────────────
@@ -113,9 +110,12 @@ ZONE = ("SELECT ST_AsText(ST_Buffer(ST_GeomFromText(:ref_wkt, :ref_srid)::geogra
         ":ref_srid AS srid")
 
 
-def within() -> str:
-    ent, e = _entity("city")
+def within(entity_type: str) -> str:
+    """Members of `entity_type` inside a zone: a point must lie within it, a
+    line or polygon must intersect it (entities.yaml `geometry_kind`)."""
+    ent, e = _entity(entity_type)
     geom = f"{e}.{ent['geometry_column']}"
+    test = "ST_Within" if ent["geometry_kind"] == "point" else "ST_Intersects"
     return (f"SELECT {e}.{ent['key_column']} AS entity_name, ST_AsText({geom}) AS wkt, ST_SRID({geom}) AS srid "
-            f"FROM {ent['table']} {e} WHERE {geom} IS NOT NULL AND ST_Within({geom}, "
+            f"FROM {ent['table']} {e} WHERE {geom} IS NOT NULL AND {test}({geom}, "
             f"ST_GeomFromText(:zone_wkt, :zone_srid)) AND NOT ({e}.{ent['key_column']} = ANY(:exclude))")

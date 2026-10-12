@@ -34,7 +34,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List
 
-from agent1.pipeline.gazetteer import GERMAN_STATES, normalize_entity_name
+from agent1.pipeline.gazetteer import names_of, normalize_entity_name
+from agent1.pipeline.query_params import DEFAULT_ENTITY_TYPE, entity_label
 from agent1.pipeline.prompt_loader import CLASSIFY_SYSTEM, EXTRACT_TEMPLATES
 from agent1.pipeline.query_params import VALID_QUERY_TYPES
 from agent1.pipeline.query_parser import VALID_ATTRS, QueryParamsBuilder
@@ -141,12 +142,16 @@ def check_extract(ex: Dict[str, Any]) -> List[str]:
     unknown = [a for a in data.get("attributes", []) or [] if a not in VALID_ATTRS]
     if unknown:
         problems.append(f"unknown attribute(s) {unknown}")
-    if meta["category"] == "DIRECT_LOOKUP" and data.get("entity_type", "state") == "state":
+    # For a closed (enumerable) type every name must be on its list — e.g.
+    # the sixteen states; an open type (cities) cannot be checked this way.
+    entity_type = data.get("entity_type") or DEFAULT_ENTITY_TYPE
+    if meta["category"] == "DIRECT_LOOKUP" and names_of(entity_type):
         spatial = data.get("spatial")
+        known = set(names_of(entity_type))
         if spatial != "all":
-            bad = [n for n in spatial or [] if normalize_entity_name(n, "state") not in GERMAN_STATES]
+            bad = [n for n in spatial or [] if normalize_entity_name(n, entity_type) not in known]
             if bad:
-                problems.append(f"not one of the sixteen states: {bad}")
+                problems.append(f"not a known {entity_label(entity_type, plural=False)}: {bad}")
 
     # Every name in the label must be in the question the model saw — catches
     # a label copied from another question. Translated names (Bavaria ->

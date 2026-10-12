@@ -1,0 +1,16 @@
+# How build_examples.py groups and splits the questions — training-data
+# policy, read by the builder instead of being written in its code.
+
+# Which categories belong to which group. The group decides the split (below)
+# and the headings in questions_vN.md; question ids start with a group letter
+# (d, g, o, r, b, u — see HOW_TO_WRITE_QUESTIONS.md).
+groups:
+  data:         [DIRECT_LOOKUP]
+  geometry:     [GEOMETRY_LOOKUP]
+  operation:    [SPATIAL_OPERATION]
+  relationship: [SPATIAL_ADJACENCY, SPATIAL_DIRECTION, SPATIAL_DISTANCE]
+  delegation:   [SPATIAL_RELATIONSHIP_BUFFER]
+  unrelated:    [UNRELATED]
+
+# Every Nth question of each group, in file order, goes to validation.
+validation_every: 10

@@ -2,7 +2,8 @@
 # delegation) — see agent1/retrieval/sql_writer.py.
 #
 # The cities that satisfy "within N km of X" are the answer, not the input, so
-# they cannot be named in a request. Agent-1 builds the zone once (step
+# they cannot be named in a request. "Cities in X" is the same search with no
+# zone step: X's own shape is the zone. Agent-1 builds the zone once (step
 # "zone"), tests its own cities against it (step "within"), and sends the zone
 # itself to Agent-2, which runs the same "within" step on its own cities.
 
@@ -16,9 +17,11 @@ steps:
       its SRID.'
 
     placeholders:
-      ref_wkt:  'text — WKT of the reference shape (a city point)'
+      ref_wkt:  'text — WKT of the reference shape (a city point or a state area)'
       ref_srid: 'int — SRID of the reference shape'
       dist_m:   'float — zone width in metres'
+
+    must_use: [ref_wkt, ref_srid, dist_m]
 
     columns: 'wkt (ST_AsText of the zone), srid.'
 
@@ -31,16 +34,23 @@ steps:
           sql: "SELECT ST_AsText(ST_Buffer(ST_GeomFromText(:ref_wkt, :ref_srid)::geography, :dist_m)::geometry) AS wkt, :ref_srid AS srid"
 
   within:
-    task: 'Return every city in this agent''s own cities table whose centroid
-      lies inside the given zone (ST_Within), skipping cities with a NULL
-      centroid and every name in :exclude.'
+    task: 'Return every member of the requested target_entity, from that entity
+      type''s own table in the schema above, whose shape falls inside the given
+      zone: a point shape must lie within the zone (ST_Within), a line or
+      polygon shape must intersect it (ST_Intersects). Use the table''s name
+      column and shape column as the schema lists them. Skip rows whose shape
+      is NULL and every name in :exclude. The zone is given only as :zone_wkt —
+      even when the question names a place ("cities in Hessen"), never join
+      that place''s table to rebuild it.'
 
     placeholders:
       zone_wkt:  'text — WKT of the zone polygon'
       zone_srid: 'int — SRID of the zone polygon'
-      exclude:   'text[] — city names to leave out (use NOT (name = ANY(:exclude)))'
+      exclude:   'text[] — names to leave out (use NOT (<name column> = ANY(:exclude)))'
 
-    columns: 'entity_name, wkt (ST_AsText of the centroid), srid (ST_SRID of the centroid).'
+    must_use: [zone_wkt, zone_srid, exclude]
+
+    columns: 'entity_name (the name column), wkt (ST_AsText of the shape), srid (ST_SRID of the shape).'
 
     examples:
       - input:

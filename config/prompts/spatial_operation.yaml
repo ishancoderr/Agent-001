@@ -23,9 +23,9 @@ sections: [intro, operations, gazetteer, output_schema, output_notes, examples]
 gazetteer: [state, city]
 
 intro: 'You are extracting the details of a SPATIAL_OPERATION query for a geospatial statistics
-  system about German states/cities. This category builds a NEW shape out of two or more
-  NAMED entities, using exactly one of five operations. Return ONLY valid JSON (no markdown
-  fences).'
+  system about ${region_adjective} states/cities. This category builds a NEW shape out of two or more
+  NAMED entities, using exactly one of five operations — and the query may then ask which
+  cities lie inside that new shape. Return ONLY valid JSON (no markdown fences).'
 
 operations_intro: 'THE FIVE OPERATIONS (there are only four ways to combine two shapes without the result
   running off to infinity, plus the named-target buffer test):'
@@ -49,7 +49,7 @@ operations:
 
 output_schema: |-
   {
-    "operation": "Union" | "Intersection" | "Difference" | "SymDifference" | "BufferWithin",
+    "operation": ${operation_names},
     "spatial": ["Bayern", "Sachsen"],
     "entity_type": "state",
     "distance_km": null
@@ -59,8 +59,11 @@ output_notes: '"spatial" lists every named entity involved, in the order they ap
   order is significant for "Difference": the first entry is the shape being reduced). For
   "BufferWithin", "spatial"[0] is the reference entity and the remaining entries are the
   named candidates to test; set "distance_km" to the distance named in the query (default
-  100 if the operation is BufferWithin and none is given). For the other four operations
-  leave "distance_km" as null. "entity_type" is "state" unless every named entity is a city.'
+  ${default_distance_km} if the operation is BufferWithin and none is given). For the other four operations
+  leave "distance_km" as null. "entity_type" is "state" unless every named entity is a city.
+  If the query also asks which CITIES lie inside the new shape (merge / combine / overlap /
+  remove, then "which cities are inside", "list the cities in that area"), add
+  "target_entity": "city"; otherwise leave the field out. Never add it for "BufferWithin".'
 
 examples:
   - query: "Give me one combined boundary for Bayern and Sachsen"
@@ -77,3 +80,9 @@ examples:
 
   - query: "Which of Nordrhein-Westfalen and Niedersachsen lie within 100 km of Dortmund?"
     output: {operation: "BufferWithin", spatial: ["Dortmund", "Nordrhein-Westfalen", "Niedersachsen"], entity_type: "state", distance_km: 100}
+
+  - query: "Combine Bayern and Sachsen into one area — which cities are inside it?"
+    output: {operation: "Union", spatial: ["Bayern", "Sachsen"], entity_type: "state", distance_km: null, target_entity: "city"}
+
+  - query: "Which cities lie in Brandenburg once Berlin is removed?"
+    output: {operation: "Difference", spatial: ["Brandenburg", "Berlin"], entity_type: "state", distance_km: null, target_entity: "city"}

@@ -19,18 +19,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from kqml_messaging import check_srid_agreement
 
-from ..pipeline.gazetteer import GERMAN_STATES, normalize_entity_name
-from ..pipeline.query_params import DEFAULT_ENTITY_TYPE, QueryParams
-from .gap_detector import Exchange, Shape, ask_agent2, get_shapes, _peer
+from ..pipeline.gazetteer import entity_type_of, names_of, normalize_entity_name
+from ..pipeline.prompt_loader import CATEGORY_CANDIDATE_TYPES
+from ..messaging.agent_registry import AGENT_NAME, PRIMARY_PEER
+from ..pipeline.query_params import (DEFAULT_ENTITY_TYPE, DEFAULT_ZONE_TARGET, ENTITY_SRID,
+                                     UNLISTED_NAME_DEFAULT, QueryParams, entity_label)
+from ..settings import DEFAULT_DISTANCE_KM, PLACE_REFERENCE_KINDS, relationship_kind, relationship_wording
+from .gap_detector import Exchange, Shape, ask_peer, get_shapes, _peer
 from .sql_writer import write_and_run
 
 log = logging.getLogger("agent1.retrieval.spatial_compute")
-
-
-def _entity_type_for(name: str, default: str) -> str:
-    """A state if the name is one of the sixteen, otherwise `default`."""
-    return "state" if normalize_entity_name(name, "state") in GERMAN_STATES else default
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SPATIAL_OPERATION — Scenarios 13-16
@@ -41,11 +39,14 @@ def run_operation(params: QueryParams, queries: List[str], exchange: Exchange) -
     operation as one LLM-written statement. Union over more than two shapes
     is a fold (Scenario 13). BufferWithin tests named targets against a zone
     around the first name. Returns {"shapes", "missing", "result"}; result is
-    None when an input is held by neither agent."""
+    None when an input is held by neither agent. When the question also asks
+    what lies inside the new shape (params.target_entity, a zone-searchable
+    type from entities.yaml), "matches" holds {"local", "remote"} — ours and
+    the ones Agent-2 found."""
     operation = params.operation
     names = params.spatial
     if operation == "BufferWithin":
-        entities = [(n, _entity_type_for(n, "city" if i == 0 else params.entity_type or DEFAULT_ENTITY_TYPE))
+        entities = [(n, entity_type_of(n, UNLISTED_NAME_DEFAULT if i == 0 else params.entity_type or DEFAULT_ENTITY_TYPE))
                     for i, n in enumerate(names)]
     else:
         entity_type = params.entity_type or DEFAULT_ENTITY_TYPE
@@ -63,15 +64,16 @@ def run_operation(params: QueryParams, queries: List[str], exchange: Exchange) -
 
     if operation == "BufferWithin":
         ref, targets = ordered[0], ordered[1:]
-        dist_m = (params.distance_km or 100.0) * 1000
+        dist_m = (params.distance_km or DEFAULT_DISTANCE_KM) * 1000
         rows = write_and_run(
             params.raw_query, "SPATIAL_OPERATION", "buffer_within",
             shown={"operation": operation, "spatial": names, "distance_km": params.distance_km},
             bind={"ref_wkt": ref.wkt, "ref_srid": ref.srid, "dist_m": dist_m,
-                  "names": [t.entity_name for t in targets], "wkts": [t.wkt for t in targets]},
+                  "names": [t.entity_name for t in targets], "wkts": [t.wkt for t in targets],
+                  "cand_srid": targets[0].srid},          # SRIDs agree, checked above
             required=["entity_name", "meets_zone"], queries=queries, label="named targets within a zone",
         )
-        out["result"] = {"reference": ref.entity_name, "distance_km": params.distance_km or 100.0,
+        out["result"] = {"reference": ref.entity_name, "distance_km": params.distance_km or DEFAULT_DISTANCE_KM,
                          "targets": [{"name": r["entity_name"], "meets_zone": r["meets_zone"]} for r in rows]}
         return out
 
@@ -83,8 +85,20 @@ def run_operation(params: QueryParams, queries: List[str], exchange: Exchange) -
             bind={"wkt_a": result.wkt, "srid_a": result.srid, "wkt_b": nxt.wkt, "srid_b": nxt.srid},
             required=["wkt"], queries=queries, label=f"{operation} of two shapes",
         )[0]["wkt"]
-        result = Shape("", result.entity_type, wkt, result.srid, source="Agent-1")
+        result = Shape("", result.entity_type, wkt, result.srid, source=AGENT_NAME)
     out["result"] = {"wkt": result.wkt, "srid": result.srid}
+
+    if params.target_entity:
+        # "...and which cities lie inside it?" The new shape is a zone like the
+        # one Scenario 20 builds: test our own table of that type, then send
+        # the zone to Agent-2 to test its own, excluding what we already found.
+        target = params.target_entity
+        local = entities_in_zone(params.raw_query, result.wkt, result.srid, [], queries, target)
+        resp = ask_peer("zone", _peer().ask_within_zone, result.wkt, result.srid,
+                          [m.entity_name for m in local], target, exchange=exchange)
+        remote = [Shape(fg.spatial_entity, fg.entity_type, fg.geometry, fg.srid, source=PRIMARY_PEER)
+                  for fg in resp.get("found", [])]
+        out["matches"] = {"local": local, "remote": remote}
     return out
 
 
@@ -93,40 +107,45 @@ def run_operation(params: QueryParams, queries: List[str], exchange: Exchange) -
 # ═══════════════════════════════════════════════════════════════════════════
 
 def resolve_relationship(params: QueryParams, queries: List[str], exchange: Exchange) -> QueryParams:
-    """Fill params.spatial with the states for which the relationship holds,
-    plus params.verdict for a yes/no question and params.unknown_states for
-    states whose shape neither agent holds.
+    """Fill params.spatial with the candidates for which the relationship
+    holds, plus params.verdict for a yes/no question and params.unknown_places
+    for candidates whose shape neither agent holds. The candidate type is the
+    category prompt's `candidate_entity:` (states, today).
 
     Shapes needed: a yes/no question ("Do Bayern and Sachsen touch?") needs
     only the subject and the reference (Scenario 17); a set question
-    ("Which states border Thüringen?") needs every state. A distance is
-    measured from a city or a state, so its reference is fetched as one."""
+    ("Which states border Thüringen?") needs every candidate. A distance is
+    measured from any named place, so its reference is fetched as its own type."""
     rel = params.spatial_relationship
     if rel is None or not rel.refs:
         raise ValueError(f"{params.query_type} needs a reference place, but none was extracted.")
     if params.query_type == "SPATIAL_DISTANCE" and rel.distance_km is None:
         raise ValueError("SPATIAL_DISTANCE needs a distance, but none was extracted.")
 
-    kind = {"SPATIAL_ADJACENCY": "adjacency", "SPATIAL_DISTANCE": "distance"}.get(params.query_type, rel.type)
-    if kind not in {"adjacency", "distance", "north_of", "south_of", "east_of", "west_of"}:
-        kind = "north_of"
+    # The kinds this category may produce come from config/settings.yaml.
+    kind = relationship_kind(params.query_type, rel.type)
 
-    states = ([normalize_entity_name(rel.subject, "state")] if rel.subject else list(GERMAN_STATES))
-    refs = [(r, _entity_type_for(r, "city") if kind == "distance" else "state") for r in rel.refs]
-    candidates = [(s, "state") for s in states]
+    # Every member of the category's candidate type is tested ("which STATES
+    # border X"); the type comes from the prompt's `candidate_entity:`, and a
+    # follow-up attribute question fetches data for that same type.
+    cand_type = CATEGORY_CANDIDATE_TYPES[params.query_type]
+    params.entity_type = cand_type
+    members = ([normalize_entity_name(rel.subject, cand_type)] if rel.subject else names_of(cand_type))
+    refs = [(r, entity_type_of(r, UNLISTED_NAME_DEFAULT if kind in PLACE_REFERENCE_KINDS else cand_type))
+            for r in rel.refs]
+    candidates = [(m, cand_type) for m in members]
     needed = list(dict.fromkeys(candidates + refs))
 
     shapes, missing = get_shapes(needed, queries, exchange)
-    unknown = sorted({name for (name, et) in missing if et == "state"})
-    params.unknown_states = unknown
+    unknown = sorted({name for (name, et) in missing if et == cand_type})
+    params.unknown_places = unknown
 
     cand_shapes = [shapes[c] for c in candidates if c in shapes]
     # The model sees only the spatial part of the question. "Population in
     # 2019 of the states bordering X" would otherwise tempt it to fetch the
     # population here; that is the data path's job, after this step.
-    wording = {"adjacency": "border", "distance": f"lie within {rel.distance_km} km of"}.get(
-        kind, f"lie {kind.replace('_of', '')} of")
-    question = f"Which of the candidate states {wording} {', '.join(rel.refs)}?"
+    wording = relationship_wording(kind, rel.distance_km)          # config/settings.yaml
+    question = f"Which of the candidate {entity_label(cand_type)} {wording} {', '.join(rel.refs)}?"
     qualifying: Optional[set] = None
     for ref in refs:
         if ref not in shapes:
@@ -139,6 +158,7 @@ def resolve_relationship(params: QueryParams, queries: List[str], exchange: Exch
             shown={"spatial_relationship": {"type": kind, "refs": rel.refs, "subject": rel.subject,
                                             "distance_km": rel.distance_km}},
             bind={"names": [s.entity_name for s in cand_shapes], "wkts": [s.wkt for s in cand_shapes],
+                  "cand_srid": cand_shapes[0].srid if cand_shapes else ENTITY_SRID[cand_type],
                   "ref": ref_shape.entity_name, "ref_wkt": ref_shape.wkt, "ref_srid": ref_shape.srid,
                   "dist_m": (rel.distance_km or 0) * 1000},
             required=["entity_name"], queries=queries, label=f"{kind} test against {ref_shape.entity_name}",
@@ -148,22 +168,22 @@ def resolve_relationship(params: QueryParams, queries: List[str], exchange: Exch
         qualifying = list(hits) if qualifying is None else [h for h in qualifying if h in set(hits)]
 
     params.spatial = list(qualifying or [])
-    params.verdict = _verdict(rel.subject, params.spatial, unknown, qualifying is None)
+    params.verdict = _verdict(rel.subject, params.spatial, unknown, qualifying is None, cand_type)
     if rel.subject:
         log.info("       | Verdict: %s %s %s -> %s", rel.subject, kind, rel.refs,
                  {True: "YES", False: "NO", None: "UNKNOWN"}[params.verdict])
-    log.info("       | Resolved to %d state(s): %s", len(params.spatial), params.spatial)
+    log.info("       | Resolved to %d %s: %s", len(params.spatial), entity_label(cand_type), params.spatial)
     return params
 
 
 def _verdict(subject: Optional[str], qualifying: List[str], unknown: List[str],
-             undetermined: bool) -> Optional[bool]:
+             undetermined: bool, cand_type: str) -> Optional[bool]:
     """Yes/no for a question that named a subject, else None. A missing
     shape gives None, never False: not knowing whether two states touch is a
     different answer from knowing that they do not (Scenario 17)."""
     if not subject or undetermined:
         return None
-    stored = normalize_entity_name(subject, "state")
+    stored = normalize_entity_name(subject, cand_type)
     if stored in unknown:
         return None
     return stored in qualifying
@@ -174,50 +194,65 @@ def _verdict(subject: Optional[str], qualifying: List[str], unknown: List[str],
 # ═══════════════════════════════════════════════════════════════════════════
 
 def buffer_query(params: QueryParams, queries: List[str], exchange: Exchange) -> Dict[str, Any]:
-    """Which cities lie within N km of a city. The answer cannot be named in
-    advance, so: get the reference point (asking Agent-2 if needed), build
-    the zone, test our own cities, then send the zone itself to Agent-2 to
-    test its cities (achieve), excluding what we already have."""
+    """Which members of a zone-searchable type (cities, today) lie within N km
+    of a place, or inside the place itself when N is 0 ("cities in Hessen").
+    The answer cannot be named in advance, so: get the reference shape
+    (asking Agent-2 if needed), build the zone, test our own table, then send
+    the zone itself to Agent-2 to test its own (achieve), excluding what we
+    already have."""
     ref_name = params.spatial[0]
-    distance_km = params.distance_km or 100.0
-    ref_pair = (ref_name, "city")
+    distance_km = DEFAULT_DISTANCE_KM if params.distance_km is None else params.distance_km
+    target = params.target_entity or DEFAULT_ZONE_TARGET
+    ref_pair = (ref_name, entity_type_of(ref_name, UNLISTED_NAME_DEFAULT))
 
     shapes, _missing = get_shapes([ref_pair], queries, exchange)
     if ref_pair not in shapes:
         return {"reference": None, "local": [], "remote": [], "distance_km": distance_km}
     ref = shapes[ref_pair]
 
-    zone = write_and_run(
-        params.raw_query, "SPATIAL_RELATIONSHIP_BUFFER", "zone",
-        shown={"spatial": params.spatial, "distance_km": distance_km},
-        bind={"ref_wkt": ref.wkt, "ref_srid": ref.srid, "dist_m": distance_km * 1000},
-        required=["wkt", "srid"], queries=queries, label=f"{distance_km:g} km zone around {ref.entity_name}",
-    )[0]
+    if distance_km:
+        zone = write_and_run(
+            params.raw_query, "SPATIAL_RELATIONSHIP_BUFFER", "zone",
+            shown={"spatial": params.spatial, "distance_km": distance_km},
+            bind={"ref_wkt": ref.wkt, "ref_srid": ref.srid, "dist_m": distance_km * 1000},
+            required=["wkt", "srid"], queries=queries, label=f"{distance_km:g} km zone around {ref.entity_name}",
+        )[0]
+    else:
+        zone = {"wkt": ref.wkt, "srid": ref.srid}      # inside the place itself: its own shape is the zone
     zone_srid = zone["srid"] or ref.srid
 
-    local = cities_in_zone(params.raw_query, zone["wkt"], zone_srid, [ref.entity_name], queries)
-    exclude = [ref.entity_name] + [c.entity_name for c in local]
-    resp = ask_agent2("zone", _peer().ask_within_zone, zone["wkt"], zone_srid, exclude, exchange=exchange)
-    remote = [Shape(fg.spatial_entity, fg.entity_type, fg.geometry, fg.srid, source="Agent-2")
+    # The reference is left out of its own answer only when it is one of the
+    # things searched for (Kassel near Kassel), not when it is the container
+    # (the city of Berlin inside the state of Berlin).
+    own = [ref.entity_name] if ref.entity_type == target else []
+    local = entities_in_zone(params.raw_query, zone["wkt"], zone_srid, own, queries, target)
+    exclude = own + [m.entity_name for m in local]
+    resp = ask_peer("zone", _peer().ask_within_zone, zone["wkt"], zone_srid, exclude, target, exchange=exchange)
+    remote = [Shape(fg.spatial_entity, fg.entity_type, fg.geometry, fg.srid, source=PRIMARY_PEER)
               for fg in resp.get("found", [])]
-    return {"reference": ref, "local": local, "remote": remote, "distance_km": distance_km}
+    return {"reference": ref, "local": local, "remote": remote, "distance_km": distance_km, "target_entity": target}
 
 
-def cities_in_zone(question: str, zone_wkt: str, zone_srid: int, exclude: List[str],
-                   queries: List[str]) -> List[Shape]:
-    """Our own cities inside a zone (the "within" step, both sides of Scenario 20)."""
+def entities_in_zone(question: str, zone_wkt: str, zone_srid: int, exclude: List[str],
+                     queries: List[str], entity_type: str) -> List[Shape]:
+    """Our own members of `entity_type` inside a zone — the "within" step,
+    used by both sides of Scenario 20 and by merge-then-search. Which table
+    and how a member is tested (a point within, a line or area intersecting)
+    come from entities.yaml through the SQL prompt's schema description."""
     rows = write_and_run(
         question, "SPATIAL_RELATIONSHIP_BUFFER", "within",
-        shown={"target_entity": "city", "exclude": exclude},
+        shown={"target_entity": entity_type, "exclude": exclude},
         bind={"zone_wkt": zone_wkt, "zone_srid": zone_srid, "exclude": [e for e in exclude if e]},
-        required=["entity_name", "wkt", "srid"], queries=queries, label="our cities inside the zone",
+        required=["entity_name", "wkt", "srid"], queries=queries,
+        label=f"our {entity_label(entity_type)} inside the zone",
     )
-    return [Shape(r["entity_name"], "city", r["wkt"], r["srid"] or zone_srid) for r in rows]
+    return [Shape(r["entity_name"], entity_type, r["wkt"], r["srid"] or zone_srid) for r in rows]
 
 
-def zone_for_peer(wkt: str, srid: int, exclude: List[str]) -> List[Dict[str, Any]]:
-    """Agent-2 delegated a zone test to us: test our cities, in wire form."""
-    hits = cities_in_zone("Agent-2 asks which of our cities lie inside this zone",
-                          wkt, srid, exclude, [])
-    return [{"spatial_entity": c.entity_name, "entity_type": "city", "geometry": c.wkt, "srid": c.srid}
-            for c in hits]
+def zone_for_peer(wkt: str, srid: int, exclude: List[str], entity_type: str, asker: str) -> List[Dict[str, Any]]:
+    """A peer (`asker`, the KQML sender) delegated a zone test to us: test our
+    own members of `entity_type` (the type its request named), in wire form."""
+    hits = entities_in_zone(f"{asker} asks which of our {entity_label(entity_type)} lie inside this zone",
+                            wkt, srid, exclude, [], entity_type)
+    return [{"spatial_entity": m.entity_name, "entity_type": entity_type, "geometry": m.wkt, "srid": m.srid}
+            for m in hits]

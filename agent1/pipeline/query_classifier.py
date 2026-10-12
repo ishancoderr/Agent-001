@@ -24,6 +24,8 @@ import openai
 from .prompt_loader import CLASSIFY_SYSTEM
 from .query_params import VALID_QUERY_TYPES
 
+from ..settings import DEFAULT_MODEL
+
 log = logging.getLogger("agent1.pipeline.classifier")
 
 # Overridable per deployment via .env (see agent1/.env.example) — same
@@ -31,7 +33,7 @@ log = logging.getLogger("agent1.pipeline.classifier")
 # single request can further override this via UserQuery.model, threaded
 # through pipeline_main.run() -> QueryClassifier(model=...); this env var only sets
 # what's used when a request doesn't ask for a specific model.
-CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", "gpt-4o-mini")
+CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", DEFAULT_MODEL)       # default: config/settings.yaml
 
 # The prompt itself lives in config/prompts/classify.yaml, not here — see
 # prompt_loader.py's load_classify_system(). Editing the wording, categories,

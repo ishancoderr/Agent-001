@@ -18,6 +18,8 @@ import openai
 
 from .prompt_loader import EXTRACT_TEMPLATES
 
+from ..settings import DEFAULT_MODEL
+
 log = logging.getLogger("agent1.pipeline.extractor")
 
 # Overridable per deployment via .env (see agent1/.env.example) — same
@@ -25,7 +27,7 @@ log = logging.getLogger("agent1.pipeline.extractor")
 # single request can further override this via UserQuery.model, threaded
 # through pipeline_main.run() -> QueryExtractor(model=...); this env var only sets
 # what's used when a request doesn't ask for a specific model.
-EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", "gpt-4o-mini")
+EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", DEFAULT_MODEL)       # default: config/settings.yaml
 MAX_TOKENS = 600      # an "all states" geometry answer needs the room
 
 

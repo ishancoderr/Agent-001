@@ -57,13 +57,13 @@ output_schema: |-
   {
     "spatial": ["Bayern"] or "all",
     "temporal": [2021],
-    "attributes": ["population"],
+    "attributes": ["${default_attribute}"],
     "entity_type": "state"
   }
 
 output_notes: '"spatial" is the named entity/entities, or "all" if none/every one of that
   entity type is named. "attributes" lists every attribute the query asks for; if none is
-  named, still include "population" since a data lookup needs at least one attribute to
+  named, still include "${default_attribute}" since a data lookup needs at least one attribute to
   answer. "entity_type" is whichever entity type''s attribute list (given above) actually
   contains what was asked for — go by the attribute and the named entity itself, not by
   assumption; default to "state" only when the query gives no basis to tell (e.g. a bare

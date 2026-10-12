@@ -14,13 +14,14 @@ query_type: SPATIAL_RELATIONSHIP_BUFFER
 
 sections: [intro, gazetteer, output_schema, output_notes, examples]
 
-gazetteer: [city]
+gazetteer: [state, city]
 
 intro: 'You are extracting the details of a SPATIAL_RELATIONSHIP_BUFFER query for a geospatial
-  statistics system about German cities. This category is a buffer-and-test query over an
+  statistics system about ${region_adjective} cities. This category is a buffer-and-test query over an
   OPEN-ENDED target type: it asks which CITIES lie within some distance of a named
-  reference city, where the target cities cannot be named in advance since they are the
-  answer. Return ONLY valid JSON (no markdown fences).'
+  reference place (a city or a state), or inside that place itself, where the target
+  cities cannot be named in advance since they are the answer. Return ONLY valid JSON
+  (no markdown fences).'
 
 output_schema: |-
   {
@@ -30,10 +31,12 @@ output_schema: |-
     "target_entity": "city"
   }
 
-output_notes: '"spatial" holds the single reference city the distance is measured from. "operations" is
-  always ["Buffer", "Within"] for this category. "distance_km" is the distance in
-  kilometres named in the query (default 100 if unspecified). "target_entity" is always
-  "city". Do not include attributes or temporal fields.'
+output_notes: '"spatial" holds the single reference place (a city or a state) the distance is
+  measured from. "operations" is always ["Buffer", "Within"] for this category.
+  "distance_km" is the distance in kilometres named in the query; 0 when the query asks
+  for the cities IN / INSIDE / WITHIN the place itself and names no distance ("cities in
+  Hessen", "cities within Bayern"); ${default_distance_km} when it only says "near" or "close to" without
+  a number. "target_entity" is always "city". Do not include attributes or temporal fields.'
 
 examples:
   - query: "Which cities lie within 100 km of Dortmund?"
@@ -41,3 +44,9 @@ examples:
 
   - query: "What cities are within 50 km of München?"
     output: {spatial: ["München"], operations: ["Buffer", "Within"], distance_km: 50, target_entity: "city"}
+
+  - query: "Which cities are in Hessen?"
+    output: {spatial: ["Hessen"], operations: ["Buffer", "Within"], distance_km: 0, target_entity: "city"}
+
+  - query: "Give me the cities within 20 km of Thüringen"
+    output: {spatial: ["Thüringen"], operations: ["Buffer", "Within"], distance_km: 20, target_entity: "city"}

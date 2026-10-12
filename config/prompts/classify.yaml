@@ -12,14 +12,14 @@ version: 1
 
 sections: [intro, categories, grammatical_note, output_instruction, classify_examples]
 
-intro: 'You are a query classifier for a geospatial statistics system about German federal states.
+intro: 'You are a query classifier for a geospatial statistics system about ${region_adjective} federal states.
   Your ONLY job is to decide which ONE category best describes the user''s question. Do not
   extract any other details — that happens in a separate step.'
 
 categories_intro: "Categories:"
 
 categories:
-  - 'DIRECT_LOOKUP: asks for population / marriages / live_births data for one or more named
+  - 'DIRECT_LOOKUP: asks for ${attribute_names} data for one or more named
     states (or "all" states). No spatial relationship, geometry, or shape combination is
     involved — a plain (state, year, attribute) lookup.'
   - 'SPATIAL_ADJACENCY: asks which state(s) border / touch / share a border with one or more
@@ -37,19 +37,26 @@ categories:
     (one boundary with another''s area removed from it), or symmetric difference (the area
     in one or the other but not both). ALSO covers a distance/buffer test where every
     candidate is explicitly NAMED in the question ("Which of X and Y lie within N km of
-    Z?") — every entity involved, reference and candidates alike, is named in the query.'
+    Z?") — every entity involved, reference and candidates alike, is named in the query.
+    ALSO covers asking which cities lie INSIDE such a new shape ("Merge X and Y — which
+    cities are inside?", "Which cities lie in X once Y is removed?"): the shape is built
+    from named states first, then searched for cities.'
   - 'SPATIAL_RELATIONSHIP_BUFFER: asks which members of an OPEN-ENDED, un-enumerable type —
-    in this system, cities — lie within some distance of a named reference. The candidates
-    are NOT named in the query; naming them is impossible because they are the answer being
-    asked for, not an input. The distinguishing test: could every entity in the question be
-    written down in advance? If yes (a fixed list of named states) → SPATIAL_OPERATION or
-    SPATIAL_DISTANCE. If no (the question only says "cities", not which ones) →
-    SPATIAL_RELATIONSHIP_BUFFER.'
-  - 'UNRELATED: the question does not name a German federal state or German city, and does
-    not ask for demographic data (population/marriages/live_births), geometry/shape, or a
-    spatial relationship/operation over German states/cities. This includes general-knowledge
+    in this system, cities — lie within some DISTANCE (km, "near", "close to") of a named
+    reference. The candidates are NOT named in the query; naming them is impossible because
+    they are the answer being asked for, not an input. The distinguishing test: could every
+    entity in the question be written down in advance? If yes (a fixed list of named states)
+    → SPATIAL_OPERATION or SPATIAL_DISTANCE. If no (the question only says "cities", not
+    which ones) and it asks about a distance from a place → SPATIAL_RELATIONSHIP_BUFFER.
+    ALSO covers which cities lie IN / INSIDE / WITHIN one named place with no distance
+    ("Which cities are in Hessen?", "Give me the cities within Bayern") — the same search
+    with a distance of 0. Cities inside a merged, overlapping or reduced area of two or
+    more named states are SPATIAL_OPERATION instead.'
+  - 'UNRELATED: the question does not name a ${region_adjective} federal state or ${region_adjective} city, and does
+    not ask for demographic data (${attribute_names}), geometry/shape, or a
+    spatial relationship/operation over ${region_adjective} states/cities. This includes general-knowledge
     questions, small talk, questions about other countries, or anything else outside this
-    system''s scope. When in doubt because the question names no recognizable German state or
+    system''s scope. When in doubt because the question names no recognizable ${region_adjective} state or
     city and matches none of the categories above, choose UNRELATED rather than forcing it
     into DIRECT_LOOKUP.'
 
@@ -103,6 +110,10 @@ examples:
     output: {query_type: "SPATIAL_RELATIONSHIP_BUFFER"}
   - query: "What cities are within 50 km of München?"
     output: {query_type: "SPATIAL_RELATIONSHIP_BUFFER"}
+  - query: "Which cities are in Hessen?"
+    output: {query_type: "SPATIAL_RELATIONSHIP_BUFFER"}
+  - query: "Combine Bayern and Sachsen into one area — which cities are inside it?"
+    output: {query_type: "SPATIAL_OPERATION"}
   - query: "What is the capital of France?"
     output: {query_type: "UNRELATED"}
   - query: "What's the weather like today?"

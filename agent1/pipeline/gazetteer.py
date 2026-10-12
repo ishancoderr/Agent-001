@@ -55,8 +55,6 @@ _ENTITIES_DOC = yaml.safe_load(_ENTITIES_PATH.read_text(encoding="utf-8"))
 _ENTITIES = _ENTITIES_DOC["entities"]
 _AMBIGUOUS_DEFAULT = _ENTITIES_DOC.get("ambiguous_name_default")
 
-GERMAN_STATES: list[str] = _data["state"]
-
 # Every enabled entity type, in entities.yaml's own declared order — what
 # `gazetteer: all` (config/prompts/direct_lookup.yaml, via
 # prompt_loader.py's _render_gazetteer()) iterates over, so a newly-added
@@ -169,6 +167,31 @@ def lookup_canonical(text: str) -> str | None:
         if canonical:
             return canonical
     return None
+
+
+def names_of(entity_type: str) -> list[str]:
+    """Every member of an enumerable (closed-list) type, as name_aliases.yaml
+    lists it — "all states" is every name here. Replaces the GERMAN_STATES
+    constant: "all" means all members of the type the question is about.
+    An open type (enumerable: false) has no complete list, so it returns []:
+    the names name_aliases.yaml keeps for it are only aliases."""
+    spec = _ENTITIES.get(entity_type, {})
+    if not spec.get("enumerable"):
+        return []
+    return list(_data.get(entity_type, []))
+
+
+def entity_type_of(name: str, fallback: str) -> str:
+    """The entity type a name belongs to when the query doesn't say: the
+    closed (enumerable) type whose list contains it — e.g. one of the sixteen
+    states — else `fallback`. Replaces the "state if it is one of the sixteen,
+    otherwise city" literals; a new closed type needs only its entities.yaml
+    and name_aliases.yaml entries."""
+    key = _normalize_key(name or "")
+    for entity_type in _LOOKUP_ORDER:
+        if _ENTITIES[entity_type].get("enumerable") and key in _CANONICAL_BY_TYPE[entity_type]:
+            return entity_type
+    return fallback
 
 
 def normalize_entity_name(name: str, entity_type: str = "") -> str:

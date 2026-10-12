@@ -15,8 +15,10 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from kqml_messaging import MissingSlot, MissingGeometrySlot
+from kqml_messaging import Encoding, Language, MissingSlot, MissingGeometrySlot, Ontology
 
+from ..messaging.agent_registry import AGENT_NAME
+from ..pipeline.query_params import DEFAULT_ZONE_TARGET, ENTITY_SRID, ZONE_SEARCH_TYPES
 from ..retrieval.gap_detector import lookup_for_peer, shapes_for_peer
 from ..retrieval.spatial_compute import zone_for_peer
 
@@ -31,9 +33,9 @@ class KQMLMessage(BaseModel):
     receiver:    str
     reply_with:  Optional[str] = None
     in_reply_to: Optional[str] = None
-    language:    str = "GeoKQML"
-    encoding:    str = "JSON"
-    ontology:    str = "geo-missingness-v2"
+    language:    str = Language.GEOKQML.value          # vocabulary from the shared kqml_messaging package
+    encoding:    str = Encoding.JSON.value
+    ontology:    str = Ontology.GEO_MISSINGNESS_V2.value
     content:     Dict[str, Any]
 
 
@@ -41,7 +43,7 @@ class KQMLMessage(BaseModel):
 def receive_kqml(msg: KQMLMessage):
     log.info(SEPARATOR)
     log.info("                       START")
-    log.info("       Incoming KQML request received by Agent 1")
+    log.info("       Incoming KQML request received by %s", AGENT_NAME)
     log.info(SEPARATOR)
     log.info("KQML   │ From: %s  req=%s", msg.sender, msg.reply_with)
 
@@ -60,7 +62,7 @@ def receive_kqml(msg: KQMLMessage):
         log.info("       │ Data slot %d: spatial=%s  temporal=%s  attrs=%s",
                  i, slot.spatial, slot.temporal, slot.attributes)
 
-        result = lookup_for_peer(slot)
+        result = lookup_for_peer(slot, msg.sender)
         log.info("       │   → found=%d  missing=%s",
                  len(result["found"]), result["missing"] or "none")
 
@@ -101,15 +103,17 @@ def receive_kqml(msg: KQMLMessage):
     raw_spatial_query = msg.content.get("spatial_query")
     if raw_spatial_query:
         wkt      = raw_spatial_query.get("geometry", "")
-        srid     = raw_spatial_query.get("srid", 4326)
         exclude  = raw_spatial_query.get("exclude", [])
-        target   = raw_spatial_query.get("target_entity", "city")
+        target   = raw_spatial_query.get("target_entity") or DEFAULT_ZONE_TARGET
+        srid     = raw_spatial_query.get("srid") or ENTITY_SRID.get(target)
         log.info("       │ Spatial query: topic=%s target=%s exclude=%d",
                  raw_spatial_query.get("topic"), target, len(exclude))
-        if target == "city":
-            city_matches = zone_for_peer(wkt, srid, exclude)
-            found_geometries.extend(city_matches)
-            log.info("       │ Spatial query matches in our catalogue: %d", len(city_matches))
+        if target in ZONE_SEARCH_TYPES:            # entities.yaml: zone_search: true
+            matches = zone_for_peer(wkt, srid, exclude, target, msg.sender)
+            found_geometries.extend(matches)
+            log.info("       │ Spatial query matches in our catalogue: %d", len(matches))
+        else:
+            log.warning("       │ Spatial query target %r is not zone-searchable here — nothing tested", target)
 
     log.info("KQML   │ Reply: found_slots=%d  missing_slots=%d  "
              "found_geometries=%d  missing_geometries=%d",
@@ -119,12 +123,12 @@ def receive_kqml(msg: KQMLMessage):
 
     return {
         "performative": "tell",
-        "sender":       "Agent-1",
+        "sender":       AGENT_NAME,
         "receiver":     msg.sender,
         "in_reply_to":  msg.reply_with,
-        "language":     "GeoKQML",
-        "encoding":     "JSON",
-        "ontology":     "geo-missingness-v2",
+        "language":     Language.GEOKQML.value,
+        "encoding":     Encoding.JSON.value,
+        "ontology":     Ontology.GEO_MISSINGNESS_V2.value,
         "metadata":     {"token_usage": 0},
         "content": {
             "found_slots":        found_slots,

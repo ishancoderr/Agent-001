@@ -26,23 +26,26 @@ from kqml_messaging import (FoundGeometrySlot, MessageFactory,
                             MissingGeometrySlot, MissingSlot)
 from kqml_messaging.serializers import JSONSerializer
 
-from .agent_registry import AGENT_REGISTRY
+from .agent_registry import AGENT_NAME, AGENT_REGISTRY, PRIMARY_PEER
 from ..retrieval.gap_detector import GapSlot
+from ..settings import PEER_TIMEOUT_S
 
 log = logging.getLogger("agent1.messaging.peer_client")
 
 # A call is two LLM-free database lookups at the peer, but the round trip still
-# has to tolerate a slow peer without hanging this agent indefinitely.
-TIMEOUT = httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=3.0)
+# has to tolerate a slow peer without hanging this agent indefinitely
+# (config/settings.yaml runtime.peer_timeout_s).
+TIMEOUT = httpx.Timeout(**PEER_TIMEOUT_S)
 
 
 class PeerClient:
-    """Sends this agent's gaps to the peer and reads the reply."""
+    """Sends this agent's gaps to a peer (by default the first one in
+    PEER_AGENTS) and reads the reply. Names and URLs come from .env."""
 
-    def __init__(self, name: str = "Agent-2", url: str | None = None, sender: str = "Agent-1"):
-        self.name = name
-        self.url = url or AGENT_REGISTRY.get(name, "http://localhost:8001")
-        self.sender = sender
+    def __init__(self, name: str | None = None, url: str | None = None, sender: str | None = None):
+        self.name = name or PRIMARY_PEER
+        self.url = url or AGENT_REGISTRY[self.name]
+        self.sender = sender or AGENT_NAME
 
     def _post(self, payload: dict) -> dict:
         log.info("       | Posting to %s ...", self.url)
@@ -94,7 +97,7 @@ class PeerClient:
         if still_missing:
             log.info("       | Still missing : %s", sorted(set(still_missing)))
 
-        return {"found": found, "missing": still_missing, "tokens_agent2": tokens,
+        return {"found": found, "missing": still_missing, "tokens_peer": tokens,
                 "ask_message": ask_payload, "tell_message": tell_payload}
 
     def ask_geometry(self, slots: List[MissingGeometrySlot]) -> Dict[str, Any]:
@@ -122,14 +125,15 @@ class PeerClient:
         return {"found": found, "missing": missing,
                 "ask_message": ask_payload, "tell_message": tell_payload}
 
-    def ask_within_zone(self, wkt: str, srid: int, exclude: List[str]) -> Dict[str, Any]:
-        """Send a constructed zone for the peer to test its own catalogue against.
+    def ask_within_zone(self, wkt: str, srid: int, exclude: List[str], target_entity: str) -> Dict[str, Any]:
+        """Send a constructed zone for the peer to test its own catalogue of
+        `target_entity` (a zone-searchable type from entities.yaml) against.
 
         The zone carries no entity name, because a shape built here has no row
-        in either store. The exclusion list stops a city both agents hold from
+        in either store. The exclusion list stops a place both agents hold from
         coming back twice."""
         spatial_query = MessageFactory.spatial_query(
-            topic="Within", geometry=wkt, target_entity="city",
+            topic="Within", geometry=wkt, target_entity=target_entity,
             srid=srid, exclude=exclude,
         )
         message = MessageFactory.ask_spatial_query(

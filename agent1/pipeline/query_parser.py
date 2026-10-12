@@ -32,11 +32,12 @@ from typing import Any, Dict, List, Tuple
 from dotenv import load_dotenv
 
 from .query_extractor import QueryExtractor
-from .gazetteer import GERMAN_STATES  # re-exported: query_controller imports it from here
+from ..settings import DEFAULT_DISTANCE_KM
+from .gazetteer import entity_type_of
 from .query_params import (QueryParams,
-                           DEFAULT_ENTITY_TYPE, RELATIONSHIP_TYPES, SpatialRelationship,
-                           VALID_ATTRS, VALID_ENTITY_TYPES, VALID_OPERATIONS,
-                           VALID_QUERY_TYPES, default_attribute_for)
+                           DEFAULT_ENTITY_TYPE, DEFAULT_ZONE_TARGET, RELATIONSHIP_TYPES, SpatialRelationship,
+                           UNLISTED_NAME_DEFAULT, VALID_ATTRS, VALID_ENTITY_TYPES, VALID_OPERATIONS,
+                           VALID_QUERY_TYPES, ZONE_SEARCH_TYPES, default_attribute_for)
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
@@ -55,11 +56,12 @@ def _sanitize_entities(raw: Any) -> List[Dict[str, str]]:
         if not isinstance(item, dict):
             continue
         name = str(item.get("entity_name", "")).strip()
-        etype = str(item.get("entity_type", "city")).strip().lower()
+        etype = str(item.get("entity_type") or "").strip().lower()
         if not name:
             continue
         if etype not in VALID_ENTITY_TYPES:
-            etype = "state" if name in GERMAN_STATES else "city"
+            # The closed list the name is in, else entities.yaml's unlisted_name_default.
+            etype = entity_type_of(name, UNLISTED_NAME_DEFAULT)
             log.warning("       | Unknown entity_type for %r - inferred as %s", name, etype)
         result.append({"entity_name": name, "entity_type": etype})
     return result
@@ -172,14 +174,20 @@ class QueryParamsBuilder:
                 except (TypeError, ValueError):
                     distance_km = None
                 if operation == "BufferWithin" and distance_km is None:
-                    distance_km = 100.0
+                    distance_km = DEFAULT_DISTANCE_KM
                 entity_type = data.get("entity_type") or DEFAULT_ENTITY_TYPE
-                log.info("       | SPATIAL_OPERATION : op=%s spatial=%s entity_type=%s distance_km=%s",
-                         operation, names, entity_type, distance_km)
+                # "...and which cities lie inside it?" — search the new shape for
+                # cities afterwards. Only the four shape-building operations make
+                # a shape to search; BufferWithin already answers with named states.
+                target_entity = (data.get("target_entity")
+                                 if data.get("target_entity") in ZONE_SEARCH_TYPES and operation != "BufferWithin"
+                                 else None)
+                log.info("       | SPATIAL_OPERATION : op=%s spatial=%s entity_type=%s distance_km=%s target=%s",
+                         operation, names, entity_type, distance_km, target_entity)
                 return QueryParams(
                     query_type="SPATIAL_OPERATION", spatial=names, temporal=[], attributes=[],
                     raw_query=original_query, operation=operation, entity_type=entity_type,
-                    distance_km=distance_km, **_trace(),
+                    distance_km=distance_km, target_entity=target_entity, **_trace(),
                 ), tokens_consumed
             # An operation needs a verb and two shapes; without them there is
             # nothing to construct, so answer it as a data lookup.
@@ -192,24 +200,29 @@ class QueryParamsBuilder:
         # ── Buffer over an open target type (Scenario 21) ────────────────────────
         if query_type == "SPATIAL_RELATIONSHIP_BUFFER":
             raw_spatial = data.get("spatial", [])
-            ref_cities = [raw_spatial] if isinstance(raw_spatial, str) else list(raw_spatial or [])
-            ref_cities = [city for city in ref_cities if city]
+            refs = [raw_spatial] if isinstance(raw_spatial, str) else list(raw_spatial or [])
+            refs = [name for name in refs if name]
 
-            if ref_cities:
+            if refs:
+                # 0 is meaningful: inside the place itself ("cities in Hessen").
                 try:
-                    distance_km = float(data.get("distance_km", 100))
+                    distance_km = float(data.get("distance_km", DEFAULT_DISTANCE_KM))
                 except (TypeError, ValueError):
-                    distance_km = 100.0
+                    distance_km = DEFAULT_DISTANCE_KM
+                # What to search the zone for: a zone-searchable type from
+                # entities.yaml, or the first such type when none is named.
+                target_entity = (data.get("target_entity")
+                                 if data.get("target_entity") in ZONE_SEARCH_TYPES else DEFAULT_ZONE_TARGET)
                 log.info("       | SPATIAL_RELATIONSHIP_BUFFER : ref=%s distance_km=%s target=%s",
-                         ref_cities, distance_km, data.get("target_entity", "city"))
+                         refs, distance_km, target_entity)
                 return QueryParams(
-                    query_type="SPATIAL_RELATIONSHIP_BUFFER", spatial=ref_cities,
+                    query_type="SPATIAL_RELATIONSHIP_BUFFER", spatial=refs,
                     temporal=[], attributes=[], raw_query=original_query,
                     distance_km=distance_km,
-                    target_entity=data.get("target_entity", "city"), **_trace(),
+                    target_entity=target_entity, **_trace(),
                 ), tokens_consumed
             # No reference to build a zone around.
-            log.warning("       | SPATIAL_RELATIONSHIP_BUFFER with no reference city - "
+            log.warning("       | SPATIAL_RELATIONSHIP_BUFFER with no reference place - "
                         "falling back to DIRECT_LOOKUP")
             query_type = "DIRECT_LOOKUP"
             data, extra = extractor.extract(query, query_type)

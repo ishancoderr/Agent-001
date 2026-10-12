@@ -103,6 +103,14 @@ The sixteen states, spelled as stored: Baden-Württemberg, Bayern, Berlin, Brand
 
 - **Difference: the first entry is the shape that is reduced** — even when the question names it second ("Remove Hamburg from Schleswig-Holstein" → `[Schleswig-Holstein, Hamburg]`).
 - **BufferWithin:** `spatial[0]` is the reference city, the rest are the named candidates; `distance_km` is the distance (100 if none is given). For the other four, `distance_km: null`.
+- **…and which cities lie inside it?** When the question also asks what lies inside the new shape ("Merge Bayern and Baden-Württemberg — which cities are inside?", "Which cities are in Niedersachsen once Bremen is removed?"), add `target_entity: city`. Allowed values are the types marked `zone_search: true` in `config/schema/entities.yaml`. Never add it to BufferWithin, and leave it out when the question only asks for the shape.
+
+  ```yaml
+  - {id: o51, category: SPATIAL_OPERATION,
+     question: "Merge Bayern and Baden-Württemberg into one area and what cities are inside that area?",
+     extract: {operation: Union, spatial: [Bayern, Baden-Württemberg], entity_type: state, distance_km: null, target_entity: city}}
+  ```
+  Contrast: cities within N **km** of a place are SPATIAL_RELATIONSHIP_BUFFER, not this.
 - `entity_type: state` unless every place is a city.
 
 ### SPATIAL_ADJACENCY / SPATIAL_DIRECTION / SPATIAL_DISTANCE — relationships (group `r`)

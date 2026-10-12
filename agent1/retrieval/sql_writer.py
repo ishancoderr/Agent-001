@@ -42,9 +42,11 @@ from sqlglot import exp
 
 from ..database import SessionLocal
 
+from ..settings import DEFAULT_MODEL, render as fill_placeholders
+
 log = logging.getLogger("agent1.retrieval.sql_writer")
 
-SQL_MODEL = os.getenv("SQL_MODEL", "gpt-4o-mini")
+SQL_MODEL = os.getenv("SQL_MODEL", DEFAULT_MODEL)       # default: config/settings.yaml
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SCHEMA_DIR = _REPO_ROOT / "config" / "schema"
@@ -110,7 +112,11 @@ def schema_description() -> str:
         if not entity.get("enabled", True):
             continue
         cols = sorted(_entity_columns(entity))
-        lines.append(f"- {entity['table']} ({entity['label_plural']}): {', '.join(cols)}")
+        # Which column names a place and which holds its shape (and of what
+        # kind) — steps that work for any entity type read it from here.
+        lines.append(f"- {entity['table']} ({entity['label_plural']}): {', '.join(cols)}; "
+                     f"name column {entity['key_column']}, shape column "
+                     f"{entity['geometry_column']} ({entity['geometry_kind']})")
     for table in _ATTRIBUTE_TABLES:
         cols = sorted(_attribute_table_columns(table))
         lines.append(
@@ -340,6 +346,7 @@ class SqlWriter:
         self.model = model
         self.tokens_used = 0
         self._prompts: Dict[str, str] = {}
+        self._must_use: Dict[str, List[str]] = {}
 
     def _system_prompt(self, category: str, step: str) -> str:
         """rules.yaml + this category's step (task, placeholders, columns,
@@ -355,8 +362,19 @@ class SqlWriter:
         if step not in steps:
             raise ValueError(f"{path.name} has no step {step!r} (has: {sorted(steps)}).")
         spec = steps[step]
+        # Placeholders the statement has to use: the step's inputs are given,
+        # never looked up again (a zone must come from :zone_wkt, not from a
+        # join on the place the question names).
+        must_use = list(spec.get("must_use", []))
+        unknown = set(must_use) - set(spec["placeholders"])
+        if unknown:
+            raise ValueError(f"{path.name} step {step!r}: must_use names unknown placeholder(s) {sorted(unknown)}")
+        self._must_use[key] = must_use
 
         placeholders = "\n".join(f"  - :{name} — {desc}" for name, desc in spec["placeholders"].items())
+        if must_use:
+            placeholders += ("\nThe statement MUST use " + ", ".join(f":{n}" for n in must_use)
+                             + " — these values are given; never look them up from a table instead.")
         examples = "\n\n".join(
             "Input: " + json.dumps(ex["input"], ensure_ascii=False)
             + "\n→ " + json.dumps(ex["output"], ensure_ascii=False)
@@ -375,6 +393,7 @@ class SqlWriter:
             'Return ONLY {"sql": "<the statement>"}.',
             "EXAMPLES:\n\n" + examples,
         ]) + "\n"
+        prompt = fill_placeholders(prompt)   # ${placeholders} from config (agent1/settings.py)
         self._prompts[key] = prompt
         return prompt
 
@@ -415,9 +434,14 @@ class SqlWriter:
             raise ValueError(f"SqlWriter response had no 'sql': {raw!r}")
 
         validate_sql(sql)
-        unknown = set(_PLACEHOLDER.findall(sql)) - set(bind)
+        used = set(_PLACEHOLDER.findall(sql))
+        unknown = used - set(bind)
         if unknown:
             raise ValueError(f"SQL uses placeholder(s) the caller does not bind: {sorted(unknown)}")
+        skipped = [n for n in self._must_use[f"{category}:{step}"] if n not in used]
+        if skipped:
+            raise ValueError(f"SQL must use placeholder(s) {[':' + n for n in skipped]} — they are given; "
+                             "do not look these values up from a table")
 
         return BuiltQuery(sql=sql, params=bind, readable=_readable(sql, bind),
                           label=label or f"{category}/{step}")

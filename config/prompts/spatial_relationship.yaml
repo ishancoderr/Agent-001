@@ -28,14 +28,20 @@ sections: [intro, gazetteer, attributes, temporal_rules, output_schema, output_n
 gazetteer: [state, city]
 attributes_entity: state
 
+# The entity type the answers of these questions are drawn from: "which STATES
+# border X" tests every member of this type against the reference. It must be
+# an enumerable (closed-list) type in config/schema/entities.yaml, because every
+# member is tested; its data is what a follow-up attribute question fetches.
+candidate_entity: state
+
 intro: 'You are extracting the details of a verdict-style spatial relationship query (adjacency,
-  direction, or distance between German federal states) for a geospatial statistics
+  direction, or distance between ${region_adjective} federal states) for a geospatial statistics
   database. Return ONLY valid JSON (no markdown fences).'
 
 attribute_rules: 'Only include an attribute the query EXPLICITLY names. A pure spatial question
   ("Which states are within 100 km of Dortmund?", "Which states touch Hessen?") asks
   for the state list itself, not data — output "attributes": [] for it. Never invent
-  population or a year the user did not mention.'
+  an attribute or a year the user did not mention.'
 
 temporal_rules: '"temporal" is always a JSON array of every individual year being asked about, listed
   out in full — NOT a start/end pair. A range like "2015-2024" must be expanded into every
@@ -51,7 +57,7 @@ output_schema: |-
     "temporal": [2021],
     "attributes": [],
     "spatial_relationship": {
-      "type": "adjacency" | "north_of" | "south_of" | "east_of" | "west_of" | "distance",
+      "type": ${relationship_kinds},
       "subject": "Sachsen" or null,
       "refs": ["Hessen", "Hamburg"],
       "distance_km": 100

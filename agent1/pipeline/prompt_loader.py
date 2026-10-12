@@ -36,6 +36,7 @@ from typing import Any, Callable, Dict, List
 import yaml
 
 from . import gazetteer
+from ..settings import render as fill_placeholders
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _PROMPTS_DIR = _REPO_ROOT / "config" / "prompts"
@@ -116,14 +117,18 @@ def _render_gazetteer(doc: Dict[str, Any]) -> List[str]:
     Which entity types exist, and their prompt wording, live in
     config/schema/entities.yaml (via gazetteer.get_names_block) — not a
     dict here, so a new entity type there needs no change in this file."""
+    return [gazetteer.get_names_block(kind) for kind in _gazetteer_kinds(doc)]
+
+
+def _gazetteer_kinds(doc: Dict[str, Any]) -> List[str]:
+    """The entity types a template's `gazetteer:` entry stands for, with the
+    "all" / "attributes" sentinels resolved (see _render_gazetteer)."""
     spec = doc.get("gazetteer", [])
     if spec == "all":
-        kinds = gazetteer.ENABLED_ENTITY_TYPES
-    elif spec == "attributes":
-        kinds = _all_attribute_entities()
-    else:
-        kinds = spec
-    return [gazetteer.get_names_block(kind) for kind in kinds]
+        return list(gazetteer.ENABLED_ENTITY_TYPES)
+    if spec == "attributes":
+        return _all_attribute_entities()
+    return list(spec)
 
 
 def _render_attributes(doc: Dict[str, Any]) -> List[str]:
@@ -273,7 +278,8 @@ def _assemble(doc: Dict[str, Any]) -> str:
                 f"_RENDERERS, or fix the typo."
             )
         parts.extend(renderer(doc))
-    return "\n\n".join(parts) + "\n"
+    # ${placeholders} come from config (agent1/settings.py), never literal text.
+    return fill_placeholders("\n\n".join(parts) + "\n")
 
 
 def _load_all() -> Dict[str, str]:
@@ -296,6 +302,46 @@ def _load_all() -> Dict[str, str]:
     return templates
 
 
+def _load_category_entity_types() -> Dict[str, List[str]]:
+    """{query_type: the entity types its names belong to} — each extraction
+    template's own `gazetteer:` list, the same one that decides which name
+    lists its prompt shows. spatial_relationship_buffer.yaml's ["city"] is how
+    the code knows the centre of "within N km of X" is a city, without a
+    literal of its own."""
+    kinds: Dict[str, List[str]] = {}
+    for path in sorted(_PROMPTS_DIR.glob("*.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if "query_type" not in doc:
+            continue
+        query_types = doc["query_type"]
+        for qt in [query_types] if isinstance(query_types, str) else query_types:
+            kinds[qt] = _gazetteer_kinds(doc)
+    return kinds
+
+
+def _load_category_candidate_types() -> Dict[str, str]:
+    """{query_type: candidate entity type} for the categories whose prompt
+    declares `candidate_entity:` — the type whose every member a relationship
+    question tests ("which STATES border X"). Checked against entities.yaml:
+    it must be an enabled, enumerable (closed-list) type."""
+    entities = yaml.safe_load((_REPO_ROOT / "config" / "schema" / "entities.yaml")
+                              .read_text(encoding="utf-8"))["entities"]
+    candidates: Dict[str, str] = {}
+    for path in sorted(_PROMPTS_DIR.glob("*.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if "query_type" not in doc or "candidate_entity" not in doc:
+            continue
+        kind = doc["candidate_entity"]
+        spec = entities.get(kind)
+        if not spec or not spec.get("enabled", True) or not spec.get("enumerable"):
+            raise ValueError(f"{path.name}: candidate_entity {kind!r} must be an enabled, enumerable "
+                             f"entity type in config/schema/entities.yaml")
+        query_types = doc["query_type"]
+        for qt in [query_types] if isinstance(query_types, str) else query_types:
+            candidates[qt] = kind
+    return candidates
+
+
 def load_classify_system() -> str:
     """Assemble config/prompts/classify.yaml into the stage-1 classify
     system prompt. Separate from _load_all() since this file isn't keyed by
@@ -313,3 +359,12 @@ EXTRACT_TEMPLATES: Dict[str, str] = _load_all()
 
 # The stage-1 classify prompt query_classifier.py sends as its system message.
 CLASSIFY_SYSTEM: str = load_classify_system()
+
+# The entity types each category's names belong to (from its prompt's own
+# `gazetteer:` list) — used where the code must know a name's type without
+# being told, e.g. the centre of a distance zone.
+CATEGORY_ENTITY_TYPES: Dict[str, List[str]] = _load_category_entity_types()
+
+# The type whose every member a relationship question tests (its prompt's
+# `candidate_entity:`) — "which STATES border X" without a "state" literal.
+CATEGORY_CANDIDATE_TYPES: Dict[str, str] = _load_category_candidate_types()

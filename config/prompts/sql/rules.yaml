@@ -39,7 +39,7 @@ rules:
   - 'Use exactly the output column names given under OUTPUT COLUMNS. The
     caller reads the result by those names, not by position.'
   - 'ORDER BY real table columns or expressions, never by an output alias
-    that is not a real column (write ORDER BY s.state_name, not
+    that is not a real column (write ORDER BY <alias>.<name column>, not
     ORDER BY entity_name).'
   - 'A CTE is allowed when it is genuinely needed (for example turning two
     array placeholders into rows with unnest()). Always name the CTE and its
@@ -48,6 +48,6 @@ rules:
     The driver does not see a placeholder that is directly followed by ::.
     A :: cast is fine on anything else, e.g. shape::geography or
     ST_GeomFromText(:wkt, :srid)::geography.'
-  - 'Distances are in metres. Buffer and distance tests on SRID 4326 shapes
-    must cast to geography first (shape::geography), otherwise the distance
-    is read as degrees.'
+  - 'Distances are in metres. Buffer and distance tests on shapes stored in
+    longitude/latitude must cast to geography first (shape::geography),
+    otherwise the distance is read as degrees.'

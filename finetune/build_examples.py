@@ -35,21 +35,27 @@ from typing import Any, Dict, List, Tuple
 import yaml
 
 from agent1.pipeline.clean_query import CleanQuery
-from agent1.pipeline.gazetteer import GERMAN_STATES, normalize_entity_name
-from agent1.pipeline.prompt_loader import CLASSIFY_SYSTEM, EXTRACT_TEMPLATES
-from agent1.retrieval.spatial_compute import _entity_type_for
+from agent1.pipeline.gazetteer import entity_type_of, names_of, normalize_entity_name
+from agent1.pipeline.prompt_loader import CATEGORY_CANDIDATE_TYPES, CLASSIFY_SYSTEM, EXTRACT_TEMPLATES
+from agent1.messaging.agent_registry import AGENT_NAME, AGENT_REGISTRY
+from agent1.pipeline.query_params import (DEFAULT_ENTITY_TYPE, DEFAULT_ZONE_TARGET, UNLISTED_NAME_DEFAULT,
+                                          ZONE_SEARCH_TYPES, entity_label)
+from agent1.settings import DEFAULT_DISTANCE_KM, PLACE_REFERENCE_KINDS, relationship_kind, relationship_wording
 from agent1.retrieval.sql_writer import _PLACEHOLDER, SqlWriter, validate_sql
 
 from . import reference_sql as ref
 
 HERE = Path(__file__).resolve().parent
 PROMPTS = HERE / "prompts"
-PEERS = ("Agent-1", "Agent-2")       # one shared model serves both agents, so both wordings
+# Every agent that can send this agent a request, so peer requests are
+# trained in each agent's own wording (one model serves all agents) — from .env.
+PEERS = sorted({AGENT_NAME, *AGENT_REGISTRY})
 
-GROUPS = {"DIRECT_LOOKUP": "data", "GEOMETRY_LOOKUP": "geometry", "SPATIAL_OPERATION": "operation",
-          "SPATIAL_ADJACENCY": "relationship", "SPATIAL_DIRECTION": "relationship",
-          "SPATIAL_DISTANCE": "relationship", "SPATIAL_RELATIONSHIP_BUFFER": "delegation",
-          "UNRELATED": "unrelated"}
+# Training-data policy (finetune/settings.yaml): category -> group, and how
+# often a question goes to validation.
+_SPLIT = yaml.safe_load((HERE / "settings.yaml").read_text(encoding="utf-8"))
+GROUPS = {cat: group for group, cats in _SPLIT["groups"].items() for cat in cats}
+VALIDATION_EVERY = int(_SPLIT["validation_every"])
 
 _sql_writer = SqlWriter(client=object())        # only _system_prompt() is used — no API calls
 
@@ -130,8 +136,8 @@ def shape_fetch_calls(entities: List[Tuple[str, str]], note: str = "") -> List[D
 
 def data_calls(q: Dict[str, Any]) -> List[Dict[str, Any]]:
     ex, raw = q["extract"], q["question"]
-    entity_type = ex.get("entity_type", "state")
-    names = list(GERMAN_STATES) if ex["spatial"] == "all" else list(ex["spatial"])
+    entity_type = ex.get("entity_type") or DEFAULT_ENTITY_TYPE
+    names = names_of(entity_type) if ex["spatial"] == "all" else list(ex["spatial"])
     years, attributes = ex["temporal"], ex["attributes"]
     fetch_sql = ref.value_fetch(entity_type, attributes)
     shown = {"entity_type": entity_type, "spatial": names, "temporal": years, "attributes": attributes}
@@ -155,35 +161,46 @@ def data_calls(q: Dict[str, Any]) -> List[Dict[str, Any]]:
 def operation_calls(q: Dict[str, Any]) -> List[Dict[str, Any]]:
     ex, raw = q["extract"], q["question"]
     operation, names = ex["operation"], ex["spatial"]
-    entity_type = ex.get("entity_type") or "state"
+    entity_type = ex.get("entity_type") or DEFAULT_ENTITY_TYPE
     if operation == "BufferWithin":
-        entities = [(n, _entity_type_for(n, "city" if i == 0 else entity_type)) for i, n in enumerate(names)]
+        entities = [(n, entity_type_of(n, UNLISTED_NAME_DEFAULT if i == 0 else entity_type)) for i, n in enumerate(names)]
         return shape_fetch_calls(entities) + [
             sql_call("SPATIAL_OPERATION", "buffer_within", raw,
-                     {"operation": operation, "spatial": names, "distance_km": float(ex.get("distance_km") or 100)},
-                     ["ref_wkt", "ref_srid", "dist_m", "names", "wkts"], ref.BUFFER_WITHIN)]
-    return shape_fetch_calls([(n, entity_type) for n in names]) + [
+                     {"operation": operation, "spatial": names, "distance_km": float(ex.get("distance_km") or DEFAULT_DISTANCE_KM)},
+                     ["ref_wkt", "ref_srid", "dist_m", "names", "wkts", "cand_srid"], ref.BUFFER_WITHIN)]
+    calls = shape_fetch_calls([(n, entity_type) for n in names]) + [
         sql_call("SPATIAL_OPERATION", "compute", raw, {"operation": operation, "spatial": names},
                  ["wkt_a", "srid_a", "wkt_b", "srid_b"], ref.operation(operation))]
+    target = ex.get("target_entity")
+    if target in ZONE_SEARCH_TYPES:
+        # "...and which cities lie inside it?" — spatial_compute.run_operation()
+        # searches the new shape with the same "within" step Scenario 20 uses.
+        calls.append(sql_call("SPATIAL_RELATIONSHIP_BUFFER", "within", raw,
+                              {"target_entity": target, "exclude": []},
+                              ["zone_wkt", "zone_srid", "exclude"], ref.within(target),
+                              title=f"SQL · {entity_label(target)} inside the new shape"))
+    return calls
 
 
 def relationship_calls(q: Dict[str, Any]) -> List[Dict[str, Any]]:
     """spatial_compute.resolve_relationship(): fetch the needed shapes, then
     one relationship statement (per reference — identical, so kept once)."""
     rel = q["extract"]["spatial_relationship"]
-    kind = {"SPATIAL_ADJACENCY": "adjacency", "SPATIAL_DISTANCE": "distance"}.get(q["category"], rel["type"])
+    kind = relationship_kind(q["category"], rel["type"])                  # config/settings.yaml
     subject = rel.get("subject")
-    states = [normalize_entity_name(subject, "state")] if subject else list(GERMAN_STATES)
-    refs = [(r, _entity_type_for(r, "city") if kind == "distance" else "state") for r in rel["refs"]]
-    needed = list(dict.fromkeys([(s, "state") for s in states] + refs))
-    wording = {"adjacency": "border", "distance": f"lie within {rel.get('distance_km')} km of"}.get(
-        kind, f"lie {kind.replace('_of', '')} of")
+    cand_type = CATEGORY_CANDIDATE_TYPES[q["category"]]          # the prompt's candidate_entity
+    members = [normalize_entity_name(subject, cand_type)] if subject else names_of(cand_type)
+    refs = [(r, entity_type_of(r, UNLISTED_NAME_DEFAULT if kind in PLACE_REFERENCE_KINDS else cand_type))
+            for r in rel["refs"]]
+    needed = list(dict.fromkeys([(m, cand_type) for m in members] + refs))
+    wording = relationship_wording(kind, rel.get("distance_km"))
     calls = shape_fetch_calls(needed)
     calls.append(sql_call(
-        "SPATIAL_RELATIONSHIP", "compute", f"Which of the candidate states {wording} {', '.join(rel['refs'])}?",
+        "SPATIAL_RELATIONSHIP", "compute",
+        f"Which of the candidate {entity_label(cand_type)} {wording} {', '.join(rel['refs'])}?",
         {"spatial_relationship": {"type": kind, "refs": rel["refs"], "subject": subject,
                                   "distance_km": rel.get("distance_km")}},
-        ["names", "wkts", "ref", "ref_wkt", "ref_srid", "dist_m"], ref.relationship(kind)))
+        ["names", "wkts", "cand_srid", "ref", "ref_wkt", "ref_srid", "dist_m"], ref.relationship(kind)))
     if q["extract"].get("attributes"):
         calls[-1]["meta"]["note"] = ("the data fetch for the resulting states follows; it is the "
                                      "DIRECT_LOOKUP fetch pattern and depends on the map, so not generated here")
@@ -192,22 +209,29 @@ def relationship_calls(q: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def delegation_calls(q: Dict[str, Any]) -> List[Dict[str, Any]]:
     ex, raw = q["extract"], q["question"]
-    ref_name = normalize_entity_name(ex["spatial"][0], "city")
-    distance_km = float(ex.get("distance_km") or 100)
-    calls = shape_fetch_calls([(ex["spatial"][0], "city")]) + [
-        sql_call("SPATIAL_RELATIONSHIP_BUFFER", "zone", raw, {"spatial": ex["spatial"], "distance_km": distance_km},
-                 ["ref_wkt", "ref_srid", "dist_m"], ref.ZONE),
-        sql_call("SPATIAL_RELATIONSHIP_BUFFER", "within", raw, {"target_entity": "city", "exclude": [ref_name]},
-                 ["zone_wkt", "zone_srid", "exclude"], ref.within()),
-    ]
+    target = ex.get("target_entity") if ex.get("target_entity") in ZONE_SEARCH_TYPES else DEFAULT_ZONE_TARGET
+    # Same as buffer_query(): the reference keeps its own type, distance 0
+    # means the place's own shape is the zone (no zone step), and the
+    # reference is excluded only when it is of the type searched for.
+    ref_type = entity_type_of(ex["spatial"][0], UNLISTED_NAME_DEFAULT)
+    ref_name = normalize_entity_name(ex["spatial"][0], ref_type)
+    distance_km = DEFAULT_DISTANCE_KM if ex.get("distance_km") is None else float(ex["distance_km"])
+    own = [ref_name] if ref_type == target else []
+    calls = shape_fetch_calls([(ex["spatial"][0], ref_type)])
+    if distance_km:
+        calls.append(sql_call("SPATIAL_RELATIONSHIP_BUFFER", "zone", raw,
+                              {"spatial": ex["spatial"], "distance_km": distance_km},
+                              ["ref_wkt", "ref_srid", "dist_m"], ref.ZONE))
+    calls.append(sql_call("SPATIAL_RELATIONSHIP_BUFFER", "within", raw, {"target_entity": target, "exclude": own},
+                          ["zone_wkt", "zone_srid", "exclude"], ref.within(target)))
     if q.get("peer"):
         for peer in PEERS:
             calls.append(sql_call("SPATIAL_RELATIONSHIP_BUFFER", "within",
-                                  f"{peer} asks which of our cities lie inside this zone",
-                                  {"target_entity": "city", "exclude": [ref_name]},
-                                  ["zone_wkt", "zone_srid", "exclude"], ref.within(),
+                                  f"{peer} asks which of our {entity_label(target)} lie inside this zone",
+                                  {"target_entity": target, "exclude": own},
+                                  ["zone_wkt", "zone_srid", "exclude"], ref.within(target),
                                   title=f"SQL · within (answering {peer})",
-                                  note=f"this agent testing its own cities for {peer}'s delegated zone"))
+                                  note=f"this agent testing its own {entity_label(target)} for {peer}'s delegated zone"))
     return calls
 
 
@@ -238,13 +262,14 @@ def calls_for(q: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def assign_splits(questions: List[Dict[str, Any]]) -> None:
-    """Every 10th question of each group goes to validation, so every group
+    """Every VALIDATION_EVERY-th question of each group (finetune/settings.yaml)
+    goes to validation, so every group
     is represented there and a question's examples never straddle the split."""
     position: Dict[str, int] = {}
     for q in questions:
         group = GROUPS[q["category"]]
         position[group] = position.get(group, 0) + 1
-        q["split"] = "val" if position[group] % 10 == 0 else "train"
+        q["split"] = "val" if position[group] % VALIDATION_EVERY == 0 else "train"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

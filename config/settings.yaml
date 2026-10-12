@@ -1,0 +1,70 @@
+# System-wide settings — the decisions that belong to no single entity type or
+# attribute table. Code reads every value here through agent1/settings.py; none
+# of them is written as a literal in Python. Prompts use them through
+# ${placeholders} (see agent1/settings.py: render()), so a prompt can never drift
+# from the value the code uses.
+
+version: 1
+
+# ── Domain ───────────────────────────────────────────────────────────────────
+
+# The region the data covers, as an adjective in prompt text ("German federal
+# states"). Prompts write ${region_adjective}.
+region_adjective: German
+
+# Distance assumed when a distance or buffer question names none ("cities close
+# to Stuttgart"). Prompts write ${default_distance_km}.
+default_distance_km: 100
+
+# The relationship kinds each relationship category may produce. The first one
+# listed is used when the extracted kind does not fit the category. Prompts
+# write ${relationship_kinds} for the full list.
+relationship_kinds:
+  SPATIAL_ADJACENCY: [adjacency]
+  SPATIAL_DIRECTION: [north_of, south_of, east_of, west_of]
+  SPATIAL_DISTANCE:  [distance]
+
+# Relationship kinds measured from any named place, not only a candidate — a
+# distance can be "within 100 km of Dortmund", a city. Their references are
+# typed with entities.yaml's unlisted_name_default when not in a closed list.
+place_reference_kinds: [distance]
+
+# How the relationship step names each kind to the SQL writer, in the neutral
+# question "Which of the candidate <type> <wording> <references>?". {km} is the
+# distance; `direction` covers every kind in direction_sectors, with {direction}
+# the kind's name without "_of".
+relationship_wording:
+  adjacency: border
+  distance:  lie within {km} km of
+  direction: lie {direction} of
+
+# Compass sectors for the direction kinds, in degrees clockwise from north,
+# measured as the bearing from the reference's centroid to the candidate's
+# (Scenario 18). A sector whose start is larger than its end wraps through 0.
+# The SQL prompt writes ${direction_sectors}.
+direction_sectors:
+  north_of: [315, 45]
+  east_of:  [45, 135]
+  south_of: [135, 225]
+  west_of:  [225, 315]
+
+# The operations a SPATIAL_OPERATION may name, and the PostGIS function each
+# combine operation uses (BufferWithin is a zone test, not a combine). Prompts
+# write ${operation_names} for the list.
+operations:
+  Union:         ST_Union
+  Intersection:  ST_Intersection
+  Difference:    ST_Difference
+  SymDifference: ST_SymDifference
+  BufferWithin:  null
+
+# ── Runtime ──────────────────────────────────────────────────────────────────
+
+runtime:
+  # Model for the three LLM calls when CLASSIFY_MODEL / EXTRACT_MODEL /
+  # SQL_MODEL are not set in .env.
+  default_model: gpt-4o-mini
+  # How many times a KQML ask to the peer is tried before its gap stays open.
+  peer_retries: 3
+  # HTTP timeouts for one KQML exchange, in seconds.
+  peer_timeout_s: {connect: 3.0, read: 15.0, write: 5.0, pool: 3.0}

@@ -30,6 +30,8 @@ from typing import Any, Dict
 
 _LOG_PATH = Path(__file__).parent.parent.parent / "evaluation_metrics.log"
 
+from ..messaging.agent_registry import AGENT_NAME, PRIMARY_PEER
+
 _metrics_log = logging.getLogger("agent1.evaluation.metrics")
 _metrics_log.propagate = False  # no console output
 
@@ -126,8 +128,8 @@ def log_evaluation_metrics(metrics: Dict[str, Any]) -> None:
         f"  Total                 : {m.get('total_ms', 0):>6.0f} ms\n"
         f"{_SEP}\n"
         f"TOKENS\n"
-        f"  Agent 1               : {m.get('tokens_agent1', 0):>6}\n"
-        f"  Agent 2               : {m.get('tokens_agent2', 0):>6}\n"
+        f"  {AGENT_NAME + ' (this agent)':<22}: {m.get('tokens_local', 0):>6}\n"
+        f"  {PRIMARY_PEER + ' (peer)':<22}: {m.get('tokens_peer', 0):>6}\n"
         f"  Total                 : {m.get('tokens_total', 0):>6}\n"
         f"{_SEP}\n"
         f"DATA QUALITY\n"

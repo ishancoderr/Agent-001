@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, ValidationError
 
 from ..pipeline import run as run_pipeline
+from ..messaging.agent_registry import AGENT_NAME, PRIMARY_PEER
 from ..pipeline.query_params import DEFAULT_ENTITY_TYPE, RELATIONSHIP_TYPES, system_capabilities_description
 from ..retrieval.gap_detector import Exchange, answer_query, get_shapes
 from ..retrieval.spatial_compute import buffer_query, resolve_relationship, run_operation
@@ -41,13 +42,10 @@ class QueryInfo(BaseModel):
     spatial: List[str]
     temporal: List[int]
     attributes: List[str]
-    # Which entities.yaml entity type the rows in `data` are about — a
-    # DIRECT_LOOKUP row's own field is still literally named "state" for
-    # every entity type (merger.py/DataRecord predate multi-entity support,
-    # and renaming that field is a separate, larger wire-contract change),
-    # so a client needs this to know to label the column "river" instead of
-    # "state" for a river query rather than showing a state-only heading
-    # for every entity type.
+    # Which entities.yaml entity type the rows in `data` are about. Each row
+    # names its place in `spatial` (the KQML wire's own field name) whatever
+    # the type, so a client reads this to label the column ("federal state",
+    # "river") instead of assuming one type.
     entity_type: str
 
 
@@ -70,15 +68,15 @@ class Summary(BaseModel):
 
 class Provenance(BaseModel):
     kqml_turns:             int
-    records_from_agent_1:   int
-    records_from_agent_2:   int
+    records_local:   int
+    records_peer:   int
     records_from_both:      int
     records_unavailable:    int
 
 
 class Tokens(BaseModel):
-    agent_1: int
-    agent_2: int
+    local: int
+    peer: int
     total:   int
 
 
@@ -108,7 +106,7 @@ def handle_query(body: UserQuery):
 
     log.info(SEPARATOR)
     log.info("                       START")
-    log.info("         New user query received by Agent 1")
+    log.info("         New user query received by %s", AGENT_NAME)
     log.info(SEPARATOR)
     log.info("       │ Request ID : %s", request_id)
     log.info("       │ Query      : %r", body.query)
@@ -120,30 +118,30 @@ def handle_query(body: UserQuery):
     except Exception as exc:
         log.error("STEP 1 │ FAILED – %s", exc)
         raise HTTPException(status_code=400, detail=f"Parse error: {exc}") from exc
-    tokens_agent1 = params.classify_tokens + params.extract_tokens
+    tokens_local = params.classify_tokens + params.extract_tokens
 
     log.info("STEP 1 │ Done")
     log.info("       │ Query type : %s", params.query_type)
 
     # ── Unrelated — reject before any DB lookup or KQML exchange ───────────────
     if params.query_type == "UNRELATED":
-        return _handle_unrelated(params, body.query, request_id, timestamp, t0, tokens_agent1)
+        return _handle_unrelated(params, body.query, request_id, timestamp, t0, tokens_local)
 
     # ── Data was asked for but no year was named or implied ────────────────────
     if params.query_type == "NEEDS_YEAR":
-        return _handle_needs_year(params, body.query, request_id, timestamp, t0, tokens_agent1)
+        return _handle_needs_year(params, body.query, request_id, timestamp, t0, tokens_local)
 
     # ── Geometry lookup — bypass demographics pipeline entirely ───────────────
     if params.query_type == "GEOMETRY_LOOKUP":
-        return _handle_geometry(params, body.query, request_id, timestamp, t0, tokens_agent1)
+        return _handle_geometry(params, body.query, request_id, timestamp, t0, tokens_local)
 
     # ── Spatial operation (Scenarios 13-16, 20) — named entities, no data lookup
     if params.query_type == "SPATIAL_OPERATION":
-        return _handle_spatial_operation(params, body.query, request_id, timestamp, t0, tokens_agent1)
+        return _handle_spatial_operation(params, body.query, request_id, timestamp, t0, tokens_local)
 
     # ── Relationship buffer over an open target type (Scenario 21) ────────────
     if params.query_type == "SPATIAL_RELATIONSHIP_BUFFER":
-        return _handle_relationship_buffer(params, body.query, request_id, timestamp, t0, tokens_agent1)
+        return _handle_relationship_buffer(params, body.query, request_id, timestamp, t0, tokens_local)
 
     log.info("       │ Spatial    : %s", params.spatial)
     log.info("       │ Temporal   : %s", params.temporal)
@@ -164,7 +162,7 @@ def handle_query(body: UserQuery):
         except ValueError as exc:
             log.error("STEP 2 │ FAILED – %s", exc)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        log.info("STEP 2 │ Resolved (%s): %s (%d states)",
+        log.info("STEP 2 │ Resolved (%s): %s (%d matches)",
                  params.query_type, params.spatial, len(params.spatial))
     else:
         log.info("STEP 2 │ Skipped (DIRECT_LOOKUP – no spatial resolution needed)")
@@ -172,13 +170,13 @@ def handle_query(body: UserQuery):
     # ── Pure spatial question — the query asked only WHICH states, not for data
     if params.query_type != "DIRECT_LOOKUP" and not params.attributes:
         t1 = time.perf_counter()
-        states = [] if params.spatial == ["all"] else list(params.spatial)
-        status = response_status(has_found=bool(states), has_missing=not states)
+        matches = [] if params.spatial == ["all"] else list(params.spatial)
+        status = response_status(has_found=bool(matches), has_missing=not matches)
         total_ms = (t1 - t0) * 1000
 
         log.info(SEPARATOR)
-        log.info("DONE   │ [%s] %s (spatial-only) status=%s  states=%d  %.0f ms",
-                 request_id, params.query_type, status, len(states), total_ms)
+        log.info("DONE   │ [%s] %s (spatial-only) status=%s  matches=%d  %.0f ms",
+                 request_id, params.query_type, status, len(matches), total_ms)
         log.info(SEPARATOR)
 
         log_evaluation_metrics({
@@ -193,8 +191,9 @@ def handle_query(body: UserQuery):
             "extracted_data":    params.extracted_data,
             "local_resolution": {
                 "resolution_method": f"LLM-written PostGIS relationship SQL ({params.query_type})",
-                "resolved_states":   states,
-                "unknown_states":    params.unknown_states,
+                "candidate_type":    params.entity_type,
+                "resolved":          matches,
+                "unknown":           params.unknown_places,
                 "sql_queries":       rel_queries,
             },
             "kqml_exchanges":    rel_exchange.messages,
@@ -202,14 +201,14 @@ def handle_query(body: UserQuery):
             "phase2_ms":         0.0,
             "phase3_ms":         0.0,
             "total_ms":          total_ms,
-            "tokens_agent1":     tokens_agent1,
-            "tokens_agent2":     rel_exchange.tokens_agent2,
-            "tokens_total":      tokens_agent1 + rel_exchange.tokens_agent2,
-            "total_records":     len(states),
-            "total_data_points": len(states),
-            "present_data_points": len(states),
+            "tokens_local":     tokens_local,
+            "tokens_peer":     rel_exchange.tokens_peer,
+            "tokens_total":      tokens_local + rel_exchange.tokens_peer,
+            "total_records":     len(matches),
+            "total_data_points": len(matches),
+            "present_data_points": len(matches),
             "missing_data_points": 0,
-            "complete_records":  len(states),
+            "complete_records":  len(matches),
             "partial_records":   0,
             "empty_records":     0,
             "status":            status,
@@ -222,6 +221,7 @@ def handle_query(body: UserQuery):
             "query": {
                 "raw":  body.query,
                 "type": params.query_type,
+                "entity_type": params.entity_type,
                 "relationship": {
                     "type":        rel.type if rel else None,
                     "subject":     rel.subject if rel else None,
@@ -230,39 +230,39 @@ def handle_query(body: UserQuery):
                 },
             },
             # A question that named a subject asked a yes/no. `verdict` carries
-            # it; `states` still carries the set the verdict was read from, so
+            # it; `matches` still carries the set the verdict was read from, so
             # the answer can be checked. verdict is null both when the question
             # asked for the list rather than a verdict, and when the subject or
-            # reference has no geometry anywhere - see `unknown_states` for the
+            # reference has no geometry anywhere - see `unknown` for the
             # latter: a null verdict with the subject listed there means the
             # relationship genuinely could not be tested, not "no".
             "verdict": params.verdict,
-            "states": states,
-            "unknown_states": params.unknown_states,
-            "summary": {"total": len(states), "verdict": params.verdict,
-                       "unknown": len(params.unknown_states),
+            "matches": matches,
+            "unknown": params.unknown_places,
+            "summary": {"total": len(matches), "verdict": params.verdict,
+                       "unknown": len(params.unknown_places),
                        "kqml_turns": rel_exchange.kqml_turns},
             "performance": {
                 "phase1_ms": round(total_ms, 1),
                 "phase2_ms": 0.0,
                 "phase3_ms": 0.0,
                 "total_ms":  round(total_ms, 1),
-                "tokens": {"agent_1": tokens_agent1, "agent_2": rel_exchange.tokens_agent2,
-                           "total": tokens_agent1 + rel_exchange.tokens_agent2},
+                "tokens": {"local": tokens_local, "peer": rel_exchange.tokens_peer,
+                           "total": tokens_local + rel_exchange.tokens_peer},
             },
         }
 
     # ── Steps 3-5: local lookup, KQML ask for gaps, merge — one call now,
     # in retrieval/gap_detector.py's answer_query() ───────────────────────────
-    log.info("STEP 3-5 │ Resolving locally, asking Agent-2 for gaps, merging ...")
-    log.info("       │ Looking for %d state(s) × %d year(s) × attrs=%s",
+    log.info("STEP 3-5 │ Resolving locally, asking %s for gaps, merging ...", PRIMARY_PEER)
+    log.info("       │ Looking for %d place(s) × %d year(s) × attrs=%s",
              len(params.spatial), len(params.temporal), params.attributes)
 
     answered = answer_query(params)
     local_result   = answered.local_result
     merged         = answered.merged
     kqml_turns     = answered.kqml_turns + rel_exchange.kqml_turns
-    tokens_agent2  = answered.tokens_agent2 + rel_exchange.tokens_agent2
+    tokens_peer  = answered.tokens_peer + rel_exchange.tokens_peer
     kqml_exchanges = rel_exchange.messages + answered.kqml_exchanges
     phase1_ms      = answered.phase1_ms
     phase2_ms      = answered.phase2_ms
@@ -299,18 +299,18 @@ def handle_query(body: UserQuery):
     completeness = round(present_pts / total_pts * 100, 1) if total_pts else 0.0
 
     # ── Provenance counts — single pass ──────────────────────────────────────
-    from_a1 = from_a2 = from_both = unavail = 0
+    from_local = from_peer = from_both = unavail = 0
     for r in merged:
         src = r.get("source", "")
-        if src == "Agent-1":    from_a1   += 1
-        elif src == "Agent-2":  from_a2   += 1
+        if src == AGENT_NAME:     from_local   += 1
+        elif src == PRIMARY_PEER: from_peer   += 1
         elif "+" in src:        from_both += 1
         elif src == "missing":  unavail   += 1
 
     log.info("       │ Groups  : complete=%d  partial=%d  missing=%d",
              len(complete_rows), len(partial_rows), len(missing_rows))
     log.info("       │ Sources : A1=%d  A2=%d  both=%d  unavail=%d",
-             from_a1, from_a2, from_both, unavail)
+             from_local, from_peer, from_both, unavail)
     log.info("       │ Data completeness: %.1f%%  (%d / %d points)",
              completeness, present_pts, total_pts)
 
@@ -337,7 +337,7 @@ def handle_query(body: UserQuery):
         "extract_model":      params.extract_model,
         "extracted_data":      params.extracted_data,
         "local_resolution": {
-            "states_queried":     params.spatial,
+            "places_queried":     params.spatial,
             "found_locally":      len(local_result.found),
             "gaps_found":         len(local_result.gaps),
             "gap_detail":         [
@@ -355,9 +355,9 @@ def handle_query(body: UserQuery):
         "phase2_ms":           phase2_ms,
         "phase3_ms":           phase3_ms,
         "total_ms":            total_ms,
-        "tokens_agent1":       tokens_agent1,
-        "tokens_agent2":       tokens_agent2,
-        "tokens_total":        tokens_agent1 + tokens_agent2,
+        "tokens_local":       tokens_local,
+        "tokens_peer":       tokens_peer,
+        "tokens_total":        tokens_local + tokens_peer,
         "total_records":       len(merged),
         "total_data_points":   total_pts,
         "present_data_points": present_pts,
@@ -396,8 +396,8 @@ def handle_query(body: UserQuery):
         ),
         provenance=Provenance(
             kqml_turns=kqml_turns,
-            records_from_agent_1=from_a1,
-            records_from_agent_2=from_a2,
+            records_local=from_local,
+            records_peer=from_peer,
             records_from_both=from_both,
             records_unavailable=unavail,
         ),
@@ -407,17 +407,17 @@ def handle_query(body: UserQuery):
             phase3_ms=round(phase3_ms, 1),
             total_ms=round(total_ms, 1),
             tokens=Tokens(
-                agent_1=tokens_agent1,
-                agent_2=tokens_agent2,
-                total=tokens_agent1 + tokens_agent2,
+                local=tokens_local,
+                peer=tokens_peer,
+                total=tokens_local + tokens_peer,
             ),
         ),
     )
 
 
-def _handle_unrelated(params, raw_query: str, request_id: str, timestamp: str, t0: float, tokens_agent1: int):
+def _handle_unrelated(params, raw_query: str, request_id: str, timestamp: str, t0: float, tokens_local: int):
     """The query names no German state/city and asks for none of this system's
-    data — nothing to look up locally, nothing to send Agent-2. Rejected outright
+    data — nothing to look up locally, nothing to send the peer. Rejected outright
     rather than coerced into a meaningless DIRECT_LOOKUP."""
     total_ms = (time.perf_counter() - t0) * 1000
 
@@ -443,9 +443,9 @@ def _handle_unrelated(params, raw_query: str, request_id: str, timestamp: str, t
         "phase2_ms":         0.0,
         "phase3_ms":         0.0,
         "total_ms":          total_ms,
-        "tokens_agent1":     tokens_agent1,
-        "tokens_agent2":     0,
-        "tokens_total":      tokens_agent1,
+        "tokens_local":     tokens_local,
+        "tokens_peer":     0,
+        "tokens_total":      tokens_local,
         "total_records":     0,
         "total_data_points": 0,
         "present_data_points": 0,
@@ -466,12 +466,12 @@ def _handle_unrelated(params, raw_query: str, request_id: str, timestamp: str, t
             "phase2_ms": 0.0,
             "phase3_ms": 0.0,
             "total_ms":  round(total_ms, 1),
-            "tokens": {"agent_1": tokens_agent1, "agent_2": 0, "total": tokens_agent1},
+            "tokens": {"local": tokens_local, "peer": 0, "total": tokens_local},
         },
     }
 
 
-def _handle_needs_year(params, raw_query: str, request_id: str, timestamp: str, t0: float, tokens_agent1: int):
+def _handle_needs_year(params, raw_query: str, request_id: str, timestamp: str, t0: float, tokens_local: int):
     """The query asked for data (population/marriages/live_births) but named
     or implied no year. Guessing one used to mean a question about 1985
     silently got answered with 2021's figures instead - a wrong answer with
@@ -503,9 +503,9 @@ def _handle_needs_year(params, raw_query: str, request_id: str, timestamp: str, 
         "phase2_ms":         0.0,
         "phase3_ms":         0.0,
         "total_ms":          total_ms,
-        "tokens_agent1":     tokens_agent1,
-        "tokens_agent2":     0,
-        "tokens_total":      tokens_agent1,
+        "tokens_local":     tokens_local,
+        "tokens_peer":     0,
+        "tokens_total":      tokens_local,
         "total_records":     0,
         "total_data_points": 0,
         "present_data_points": 0,
@@ -532,21 +532,21 @@ def _handle_needs_year(params, raw_query: str, request_id: str, timestamp: str, 
             "phase2_ms": 0.0,
             "phase3_ms": 0.0,
             "total_ms":  round(total_ms, 1),
-            "tokens": {"agent_1": tokens_agent1, "agent_2": 0, "total": tokens_agent1},
+            "tokens": {"local": tokens_local, "peer": 0, "total": tokens_local},
         },
     }
 
 
 def _handle_geometry(params, raw_query: str, request_id: str,
-                     timestamp: str, t0: float, tokens_agent1: int):
-    """Handle GEOMETRY_LOOKUP queries — resolve locally then ask Agent-2 if missing."""
+                     timestamp: str, t0: float, tokens_local: int):
+    """Handle GEOMETRY_LOOKUP queries — resolve locally then ask the peer if missing."""
     entities = params.entities or []
     if not entities:
         return {"request_id": request_id, "status": "error",
                 "message": "No entities found in geometry query.",
                 "performance": {"phase1_ms": round((time.perf_counter()-t0)*1000,1),
                                 "phase2_ms":0,"phase3_ms":0,"total_ms":0,
-                                "tokens":{"agent_1":tokens_agent1,"agent_2":0,"total":tokens_agent1}}}
+                                "tokens":{"local":tokens_local,"peer":0,"total":tokens_local}}}
     log.info("GEOM   │ Resolving %d entity/entities: %s", len(entities), entities)
 
     # Scenarios 9-12: SqlWriter fetches our shapes, the gap (no row, or row
@@ -556,7 +556,7 @@ def _handle_geometry(params, raw_query: str, request_id: str,
     pairs = [(e["entity_name"], e["entity_type"]) for e in entities]
     shapes, still_missing = get_shapes(pairs, sql_queries, exchange)
     kqml_turns     = exchange.kqml_turns
-    tokens_agent2  = exchange.tokens_agent2
+    tokens_peer  = exchange.tokens_peer
     kqml_exchanges = exchange.messages
 
     geometries = []
@@ -567,15 +567,15 @@ def _handle_geometry(params, raw_query: str, request_id: str,
                                "wkt": shape.wkt, "srid": shape.srid, "source": shape.source})
         else:
             geometries.append({"entity_name": pair[0], "entity_type": pair[1], "wkt": None, "srid": None,
-                               "source": "not_found", "miss_mode_agent1": still_missing.get(pair)})
+                               "source": "not_found", "miss_mode_local": still_missing.get(pair)})
 
     t3 = time.perf_counter()
     phase1_ms = exchange.local_ms
     phase2_ms = exchange.peer_ms
     total_ms  = (t3 - t0) * 1000
     phase3_ms = max(total_ms - phase1_ms - phase2_ms, 0.0)
-    local_names = sorted(s.entity_name for s in shapes.values() if s.source == "Agent-1")
-    missing_here = [name for (name, _t) in pairs if (name, _t) not in shapes or shapes[(name, _t)].source != "Agent-1"]
+    local_names = sorted(s.entity_name for s in shapes.values() if s.source == AGENT_NAME)
+    missing_here = [name for (name, _t) in pairs if (name, _t) not in shapes or shapes[(name, _t)].source != AGENT_NAME]
 
     found_count   = sum(1 for g in geometries if g["wkt"] is not None)
     missing_count = len(geometries) - found_count
@@ -608,9 +608,9 @@ def _handle_geometry(params, raw_query: str, request_id: str,
         "phase2_ms":         phase2_ms,
         "phase3_ms":         phase3_ms,
         "total_ms":          total_ms,
-        "tokens_agent1":     tokens_agent1,
-        "tokens_agent2":     tokens_agent2,
-        "tokens_total":      tokens_agent1 + tokens_agent2,
+        "tokens_local":     tokens_local,
+        "tokens_peer":     tokens_peer,
+        "tokens_total":      tokens_local + tokens_peer,
         "total_records":     len(geometries),
         "total_data_points": len(geometries),
         "present_data_points": found_count,
@@ -641,9 +641,9 @@ def _handle_geometry(params, raw_query: str, request_id: str,
             "phase3_ms": round(phase3_ms, 1),
             "total_ms":  round(total_ms, 1),
             "tokens": {
-                "agent_1": tokens_agent1,
-                "agent_2": tokens_agent2,
-                "total":   tokens_agent1 + tokens_agent2,
+                "local": tokens_local,
+                "peer": tokens_peer,
+                "total":   tokens_local + tokens_peer,
             },
         },
     }
@@ -667,7 +667,7 @@ _AREA_GEOMETRY_TYPES = {"POLYGON", "MULTIPOLYGON"}
 
 
 def _handle_spatial_operation(params, raw_query: str, request_id: str,
-                              timestamp: str, t0: float, tokens_agent1: int):
+                              timestamp: str, t0: float, tokens_local: int):
     """Scenarios 13-16 (Union/Intersection/Difference/SymDifference) and the
     named-target BufferWithin. Every input is named, so its shape is fetched
     like GEOMETRY_LOOKUP (locally, or via a :missing-geometries ask), the SRIDs
@@ -681,7 +681,7 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
                 "message": "SPATIAL_OPERATION requires an operation and at least two named entities.",
                 "performance": {"phase1_ms": round((time.perf_counter()-t0)*1000, 1),
                                 "phase2_ms": 0, "phase3_ms": 0, "total_ms": 0,
-                                "tokens": {"agent_1": tokens_agent1, "agent_2": 0, "total": tokens_agent1}}}
+                                "tokens": {"local": tokens_local, "peer": 0, "total": tokens_local}}}
 
     log.info("SPOP   │ Operation: %s  entities=%s", operation, names)
 
@@ -731,6 +731,16 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
                        else ".")
                 )
 
+
+
+    # "...and which cities lie inside it?" — same shape of answer as the
+    # Scenario 20 zone search: ours and Agent-2's, each tagged with its source.
+    found = outcome.get("matches")
+    if found is not None:
+        payload["matches"] = _zone_matches(found["local"] + found["remote"])
+        payload["summary"] = {"total": len(payload["matches"]), "from_local": len(found["local"]),
+                              "from_peer": len(found["remote"])}
+
     log.info(SEPARATOR)
     log.info("DONE   │ [%s] SPATIAL_OPERATION op=%s status=%s  %.0f ms", request_id, operation, status, total_ms)
     log.info(SEPARATOR)
@@ -745,6 +755,8 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
         "local_resolution": {
             "operation":          operation,
             "entities_requested": names,
+            "target_entity":      params.target_entity,
+            "matches_found":      len(payload.get("matches", [])),
             "sources":            sources,
             "still_missing":      unresolved,
             "error":              error,
@@ -752,8 +764,8 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
         },
         "kqml_exchanges": exchange.messages,
         "phase1_ms": phase1_ms, "phase2_ms": phase2_ms, "phase3_ms": phase3_ms, "total_ms": total_ms,
-        "tokens_agent1": tokens_agent1, "tokens_agent2": exchange.tokens_agent2,
-        "tokens_total": tokens_agent1 + exchange.tokens_agent2,
+        "tokens_local": tokens_local, "tokens_peer": exchange.tokens_peer,
+        "tokens_total": tokens_local + exchange.tokens_peer,
         "total_records": len(names), "total_data_points": len(names),
         "present_data_points": found_count, "missing_data_points": len(unresolved),
         "complete_records": found_count if result is not None else 0,
@@ -765,13 +777,13 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
         "request_id": request_id,
         "status":     status,
         "query": {"raw": raw_query, "type": "SPATIAL_OPERATION", "operation": operation,
-                  "spatial": names, "sources": sources},
+                  "spatial": names, "target_entity": params.target_entity, "sources": sources},
         **payload,
         "performance": {
             "phase1_ms": round(phase1_ms, 1), "phase2_ms": round(phase2_ms, 1),
             "phase3_ms": round(phase3_ms, 1), "total_ms": round(total_ms, 1),
-            "tokens": {"agent_1": tokens_agent1, "agent_2": exchange.tokens_agent2,
-                       "total": tokens_agent1 + exchange.tokens_agent2},
+            "tokens": {"local": tokens_local, "peer": exchange.tokens_peer,
+                       "total": tokens_local + exchange.tokens_peer},
         },
     }
     if unresolved:
@@ -781,31 +793,37 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
     return response
 
 
+def _zone_matches(found) -> List[Dict[str, Any]]:
+    """Places found inside a zone, in response form, sorted by name. Each
+    carries its own entity_type, so the response never assumes cities."""
+    return sorted(
+        [{"name": m.entity_name, "entity_type": m.entity_type, "wkt": m.wkt, "srid": m.srid, "source": m.source}
+         for m in found],
+        key=lambda m: m["name"],
+    )
+
+
 def _handle_relationship_buffer(params, raw_query: str, request_id: str,
-                                timestamp: str, t0: float, tokens_agent1: int):
-    """Scenario 20: which cities lie within N km of a city. The cities are the
-    answer, not the input, so they cannot be named in a request: the zone is
-    built here, tested against our own cities, then sent to Agent-2 to test
-    its own (query delegation)."""
+                                timestamp: str, t0: float, tokens_local: int):
+    """Scenario 20: which members of a zone-searchable type (cities, today)
+    lie within N km of a place. They are the answer, not the input, so they
+    cannot be named in a request: the zone is built here, tested against our
+    own table, then sent to the peer to test its own (query delegation)."""
     if not params.spatial:
         return {"request_id": request_id, "status": "error",
-                "message": "No reference city found in the query.",
+                "message": "No reference place found in the query.",
                 "performance": {"phase1_ms": round((time.perf_counter()-t0)*1000, 1),
                                 "phase2_ms": 0, "phase3_ms": 0, "total_ms": 0,
-                                "tokens": {"agent_1": tokens_agent1, "agent_2": 0, "total": tokens_agent1}}}
+                                "tokens": {"local": tokens_local, "peer": 0, "total": tokens_local}}}
 
-    log.info("SPOP   │ Buffer query: %s within %s km", params.spatial[0], params.distance_km or 100.0)
+    log.info("SPOP   │ Buffer query: %s within %s km", params.spatial[0], params.distance_km)
 
     sql_queries: List[str] = []
     exchange = Exchange()
     outcome = buffer_query(params, sql_queries, exchange)
     ref, local, remote = outcome["reference"], outcome["local"], outcome["remote"]
-    distance_km = outcome["distance_km"]
-
-    cities = sorted(
-        [{"city_name": c.entity_name, "wkt": c.wkt, "srid": c.srid, "source": c.source} for c in local + remote],
-        key=lambda c: c["city_name"],
-    )
+    distance_km, target = outcome["distance_km"], outcome["target_entity"]
+    matches = _zone_matches(local + remote)
 
     total_ms  = (time.perf_counter() - t0) * 1000
     phase1_ms = exchange.local_ms
@@ -813,11 +831,11 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
     phase3_ms = max(total_ms - phase1_ms - phase2_ms, 0.0)
 
     if ref is None:
-        log.warning("SPOP   │ Reference city %r held by neither agent — no zone can be built", params.spatial[0])
-    status = response_status(has_found=bool(cities), has_missing=ref is None or not cities)
+        log.warning("SPOP   │ Reference place %r held by neither agent — no zone can be built", params.spatial[0])
+    status = response_status(has_found=bool(matches), has_missing=ref is None or not matches)
 
     log.info(SEPARATOR)
-    log.info("DONE   │ [%s] buffer status=%s  found=%d  %.0f ms", request_id, status, len(cities), total_ms)
+    log.info("DONE   │ [%s] buffer status=%s  found=%d  %.0f ms", request_id, status, len(matches), total_ms)
     log.info(SEPARATOR)
 
     log_evaluation_metrics({
@@ -827,21 +845,22 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
         "classify_model": params.classify_model, "extract_model": params.extract_model,
         "extracted_data": params.extracted_data,
         "local_resolution": {
-            "reference_city":   ref.entity_name if ref else params.spatial[0],
+            "reference":        ref.entity_name if ref else params.spatial[0],
             "reference_source": ref.source if ref else "not_found",
             "distance_km":      distance_km,
+            "target_entity":    target,
             "local_catalogue_matches": len(local),
-            "note": "the matching cities cannot be named in advance — the zone is built once, "
-                    "tested against this agent's cities, then sent to Agent-2 to test its own",
+            "note": "the matches cannot be named in advance — the zone is built once, "
+                    f"tested against this agent's table, then sent to {PRIMARY_PEER} to test its own",
             "sql_queries": sql_queries,
         },
         "kqml_exchanges": exchange.messages,
         "phase1_ms": phase1_ms, "phase2_ms": phase2_ms, "phase3_ms": phase3_ms, "total_ms": total_ms,
-        "tokens_agent1": tokens_agent1, "tokens_agent2": exchange.tokens_agent2,
-        "tokens_total": tokens_agent1 + exchange.tokens_agent2,
-        "total_records": len(cities), "total_data_points": len(cities),
-        "present_data_points": len(cities), "missing_data_points": 0,
-        "complete_records": len(cities), "partial_records": 0, "empty_records": 0,
+        "tokens_local": tokens_local, "tokens_peer": exchange.tokens_peer,
+        "tokens_total": tokens_local + exchange.tokens_peer,
+        "total_records": len(matches), "total_data_points": len(matches),
+        "present_data_points": len(matches), "missing_data_points": 0,
+        "complete_records": len(matches), "partial_records": 0, "empty_records": 0,
         "status": status,
     })
 
@@ -851,17 +870,18 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
         "query": {
             "raw":              raw_query,
             "type":             "SPATIAL_RELATIONSHIP_BUFFER",
-            "reference_city":   ref.entity_name if ref else params.spatial[0],
+            "reference":        ref.entity_name if ref else params.spatial[0],
             "reference_source": ref.source if ref else "not_found",
             "distance_km":      distance_km,
+            "target_entity":    target,
         },
-        "cities": cities,
-        "summary": {"total": len(cities), "from_agent_1": len(local), "from_agent_2": len(remote)},
+        "matches": matches,
+        "summary": {"total": len(matches), "from_local": len(local), "from_peer": len(remote)},
         "performance": {
             "phase1_ms": round(phase1_ms, 1), "phase2_ms": round(phase2_ms, 1),
             "phase3_ms": round(phase3_ms, 1), "total_ms": round(total_ms, 1),
-            "tokens": {"agent_1": tokens_agent1, "agent_2": exchange.tokens_agent2,
-                       "total": tokens_agent1 + exchange.tokens_agent2},
+            "tokens": {"local": tokens_local, "peer": exchange.tokens_peer,
+                       "total": tokens_local + exchange.tokens_peer},
         },
     }
 
@@ -869,4 +889,4 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
 @router.get("/health")
 def health():
     log.info("Health check OK")
-    return {"status": "ok", "agent": "Agent-1"}
+    return {"status": "ok", "agent": AGENT_NAME, "peers": [PRIMARY_PEER]}

@@ -44,7 +44,8 @@ steps:
       to geography, buffer, cast back to geometry) and test every target
       against it with ST_Intersects. Return a three-valued result per target:
       -1 when the target shape is NULL, 1 when it meets the zone, 0 otherwise.
-      Turn the two target arrays into rows with unnest().'
+      Turn the two target arrays into rows with unnest(), building each target
+      with ST_GeomFromText(w, :cand_srid).'
 
     placeholders:
       ref_wkt:  'text — WKT of the reference shape'
@@ -52,6 +53,7 @@ steps:
       dist_m:   'float — zone width in metres'
       names:    'text[] — target names, parallel to :wkts'
       wkts:     'text[] — target WKT, parallel to :names'
+      cand_srid: 'int — SRID of the target WKT'
 
     columns: 'entity_name, meets_zone (-1, 0 or 1).'
 
@@ -62,4 +64,4 @@ steps:
           spatial: ["Dortmund", "Nordrhein-Westfalen", "Niedersachsen"]
           distance_km: 100
         output:
-          sql: "WITH targets(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, 4326) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(n, w)), zone(g) AS (SELECT ST_Buffer(ST_GeomFromText(:ref_wkt, :ref_srid)::geography, :dist_m)::geometry) SELECT targets.entity_name AS entity_name, CASE WHEN targets.shape IS NULL THEN -1 WHEN ST_Intersects(targets.shape, zone.g) THEN 1 ELSE 0 END AS meets_zone FROM targets, zone"
+          sql: "WITH targets(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, :cand_srid) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(n, w)), zone(g) AS (SELECT ST_Buffer(ST_GeomFromText(:ref_wkt, :ref_srid)::geography, :dist_m)::geometry) SELECT targets.entity_name AS entity_name, CASE WHEN targets.shape IS NULL THEN -1 WHEN ST_Intersects(targets.shape, zone.g) THEN 1 ELSE 0 END AS meets_zone FROM targets, zone"

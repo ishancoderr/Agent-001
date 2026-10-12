@@ -6,7 +6,7 @@ The same five steps run for every question, after parameter extraction:
     1. SqlWriter writes the SELECT from the question + parameters
     2. run it on this agent's database
     3. gap = what was asked for − what came back          (plain set arithmetic)
-    4. ask Agent-2 for the gap over KQML (up to 3 tries)
+    4. ask Agent-2 for the gap over KQML (runtime.peer_retries tries)
     5. merge both agents' answers
 
 Two kinds of thing can be missing, and both are handled here:
@@ -32,8 +32,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from kqml_messaging import MessageFactory, gap_signature
 
-from ..pipeline.gazetteer import GERMAN_STATES, normalize_entity_name
-from ..pipeline.query_params import DEFAULT_ENTITY_TYPE, QueryParams
+from ..pipeline.gazetteer import names_of, normalize_entity_name
+from ..messaging.agent_registry import AGENT_NAME, PRIMARY_PEER
+from ..pipeline.query_params import DEFAULT_ENTITY_TYPE, ENTITY_SRID, QueryParams
+from ..settings import PEER_RETRIES
 from .sql_writer import write_and_run
 
 log = logging.getLogger("agent1.retrieval.gap_detector")
@@ -45,11 +47,12 @@ log = logging.getLogger("agent1.retrieval.gap_detector")
 
 @dataclass
 class DataRecord:
-    """One place's values for one year, and which agent they came from."""
-    state: str
+    """One place's values for one year, and which agent they came from.
+    `spatial` is the place's name — the same field name the KQML wire uses."""
+    spatial: str
     year: int
     values: Dict[str, Any] = field(default_factory=dict)
-    source: str = "Agent-1"
+    source: str = AGENT_NAME                 # this agent's own name, from .env
 
 
 @dataclass
@@ -79,10 +82,10 @@ class AnsweredQuery:
     merged: List[Dict[str, Any]]
     local_result: LocalResult
     kqml_turns: int = 0
-    tokens_agent2: int = 0
+    tokens_peer: int = 0
     kqml_exchanges: List[Dict[str, Any]] = field(default_factory=list)
     phase1_ms: float = 0.0   # SQL write + local lookup + gap detection
-    phase2_ms: float = 0.0   # KQML round trip to Agent-2 (0 if no gaps)
+    phase2_ms: float = 0.0   # KQML round trip to the peer (0 if no gaps)
     phase3_ms: float = 0.0   # merge
 
 
@@ -93,7 +96,7 @@ class Shape:
     entity_type: str
     wkt: str
     srid: int
-    source: str = "Agent-1"
+    source: str = AGENT_NAME
 
 
 @dataclass
@@ -101,36 +104,37 @@ class Exchange:
     """Everything that crossed the wire for one question: one turn per
     request/reply pair (Section 1.8)."""
     kqml_turns: int = 0
-    tokens_agent2: int = 0
+    tokens_peer: int = 0
     messages: List[Dict[str, Any]] = field(default_factory=list)
     local_ms: float = 0.0     # time spent writing + running our own SQL for shapes
-    peer_ms: float = 0.0      # time spent waiting for Agent-2
+    peer_ms: float = 0.0      # time spent waiting for the peer
 
     def record(self, resp: Dict[str, Any]) -> None:
         self.kqml_turns += 1
-        self.tokens_agent2 += resp.get("tokens_agent2", 0) or 0
+        self.tokens_peer += resp.get("tokens_peer", 0) or 0
         if "ask_message" in resp and "tell_message" in resp:
             self.messages.append({"ask": resp["ask_message"], "tell": resp["tell_message"]})
 
 
-def ask_agent2(what: str, call: Callable[..., Dict[str, Any]], *args, exchange: Exchange) -> Dict[str, Any]:
-    """Send one ask to Agent-2, retrying up to 3 times. Returns the reply, or
-    an empty one if Agent-2 could not be reached (the gap then stays open)."""
+def ask_peer(what: str, call: Callable[..., Dict[str, Any]], *args, exchange: Exchange) -> Dict[str, Any]:
+    """Send one ask to the peer, trying up to PEER_RETRIES times
+    (config/settings.yaml). Returns the reply, or an empty one if the peer
+    could not be reached (the gap then stays open)."""
     started = time.perf_counter()
-    for attempt in range(1, 4):
+    for attempt in range(1, PEER_RETRIES + 1):
         try:
             resp = call(*args)
             exchange.peer_ms += (time.perf_counter() - started) * 1000
             exchange.record(resp)
-            log.info("       | Agent-2 replied to %s ask (attempt %d): %d found",
-                     what, attempt, len(resp.get("found", [])))
+            log.info("       | %s replied to %s ask (attempt %d): %d found",
+                     PRIMARY_PEER, what, attempt, len(resp.get("found", [])))
             return resp
         except Exception as exc:                    # noqa: BLE001 — peer down must not fail the query
-            log.warning("       | Agent-2 %s ask, attempt %d failed - %s", what, attempt, exc)
-            if attempt < 3:
+            log.warning("       | %s %s ask, attempt %d failed - %s", PRIMARY_PEER, what, attempt, exc)
+            if attempt < PEER_RETRIES:
                 time.sleep(1.0 * attempt)
     exchange.peer_ms += (time.perf_counter() - started) * 1000
-    log.warning("       | Agent-2 unreachable after 3 attempts - %s gap stays open", what)
+    log.warning("       | %s unreachable after %d attempts - %s gap stays open", PRIMARY_PEER, PEER_RETRIES, what)
     return {}
 
 
@@ -189,7 +193,7 @@ def detect_gaps(names: List[str], years: List[int], attributes: List[str],
             present = {a: v for a, v in values.items() if v is not None}
             missing = tuple(a for a in attributes if a not in present)
             if present:
-                found.append(DataRecord(state=name, year=year, values=present))
+                found.append(DataRecord(spatial=name, year=year, values=present))
                 log.info("       | FOUND : %s %d -> %s", name, year, present)
             if not missing:
                 continue
@@ -212,7 +216,7 @@ def detect_gaps(names: List[str], years: List[int], attributes: List[str],
             for (yrs, attrs), places in blocks.items()]
 
     signature = gap_signature(bool(miss_spatial), bool(miss_temporal), bool(miss_attr))
-    diagnosis = {"a1_has": [f"{r.state} {r.year}" for r in found],
+    diagnosis = {"a1_has": [f"{r.spatial} {r.year}" for r in found],
                  "missing_spatial": miss_spatial, "missing_temporal": miss_temporal,
                  "missing_attribute": miss_attr, "gap_signature": list(signature)}
     log.info("       | %d value(s) found, %d gap block(s), gap signature %s", len(found), len(gaps), signature)
@@ -224,7 +228,8 @@ def answer_query(params: QueryParams) -> AnsweredQuery:
     from ..result.merger import merge_results   # deferred: merger imports DataRecord from here
 
     entity_type = params.entity_type or DEFAULT_ENTITY_TYPE
-    names = list(GERMAN_STATES) if "all" in params.spatial else list(params.spatial)
+    # "all" means every member of the type the question is about.
+    names = names_of(entity_type) if "all" in params.spatial else list(params.spatial)
     queries: List[str] = []
     exchange = Exchange()
 
@@ -238,20 +243,20 @@ def answer_query(params: QueryParams) -> AnsweredQuery:
 
     resp: Dict[str, Any] = {}
     if gaps:
-        resp = ask_agent2("data", _peer().ask_data, gaps, exchange=exchange)
+        resp = ask_peer("data", _peer().ask_data, gaps, exchange=exchange)
     else:
-        log.info("       | No gaps - Agent-2 not needed")
+        log.info("       | No gaps - %s not needed", PRIMARY_PEER)
     t2 = time.perf_counter()
 
     merged = merge_results(found, resp.get("found", []),
-                           requested_states=params.spatial, requested_years=params.temporal,
-                           requested_attrs=params.attributes)
+                           requested_places=params.spatial, requested_years=params.temporal,
+                           requested_attrs=params.attributes, entity_type=entity_type)
     t3 = time.perf_counter()
 
     return AnsweredQuery(
         merged=merged,
         local_result=LocalResult(found=found, gaps=gaps, queries=queries, diagnosis=diagnosis),
-        kqml_turns=exchange.kqml_turns, tokens_agent2=exchange.tokens_agent2,
+        kqml_turns=exchange.kqml_turns, tokens_peer=exchange.tokens_peer,
         kqml_exchanges=exchange.messages,
         phase1_ms=(t1 - t0) * 1000, phase2_ms=(t2 - t1) * 1000, phase3_ms=(t3 - t2) * 1000,
     )
@@ -290,7 +295,7 @@ def fetch_shapes(entities: List[Tuple[str, str]], queries: List[str]
         for pair, name in stored.items():
             row = rows.get(name)
             if row is not None and row["wkt"]:
-                found[pair] = Shape(row["entity_name"], entity_type, row["wkt"], row["srid"] or 4326)
+                found[pair] = Shape(row["entity_name"], entity_type, row["wkt"], row["srid"] or ENTITY_SRID[entity_type])
                 log.info("       | SHAPE : %s (%s) found", name, entity_type)
             else:
                 missing[pair] = "geometry-null" if row is not None else "unknown-feature"
@@ -318,14 +323,14 @@ def get_shapes(entities: List[Tuple[str, str]], queries: List[str], exchange: Ex
             slots.append(MessageFactory.missing_geometry_slot(spatial_entity=stored, entity_type=entity_type))
             slot_pair[(stored.lower(), entity_type)] = pair
         except Exception as exc:                    # noqa: BLE001 — a type the protocol cannot carry
-            log.warning("       | Cannot ask Agent-2 for %r (%s): %s", name, entity_type, exc)
+            log.warning("       | Cannot ask %s for %r (%s): %s", PRIMARY_PEER, name, entity_type, exc)
 
     if slots:
-        resp = ask_agent2("geometry", _peer().ask_geometry, slots, exchange=exchange)
+        resp = ask_peer("geometry", _peer().ask_geometry, slots, exchange=exchange)
         for fg in resp.get("found", []):
             pair = slot_pair.get((fg.spatial_entity.lower(), fg.entity_type))
             if pair is not None:
-                shapes[pair] = Shape(fg.spatial_entity, fg.entity_type, fg.geometry, fg.srid, source="Agent-2")
+                shapes[pair] = Shape(fg.spatial_entity, fg.entity_type, fg.geometry, fg.srid, source=PRIMARY_PEER)
     still_missing = {pair: mode for pair, mode in missing.items() if pair not in shapes}
     if still_missing:
         log.info("       | Shapes held by neither agent: %s", sorted(still_missing))
@@ -336,30 +341,31 @@ def get_shapes(entities: List[Tuple[str, str]], queries: List[str], exchange: Ex
 # Agent-2 asks us — the same fetches, answering instead of asking
 # ═══════════════════════════════════════════════════════════════════════════
 
-def lookup_for_peer(slot) -> Dict[str, Any]:
-    """Answer one of Agent-2's :missing-slots entries from our own data.
-    Reports, per place, only the years still missing here."""
+def lookup_for_peer(slot, asker: str) -> Dict[str, Any]:
+    """Answer one of a peer's :missing-slots entries from our own data.
+    `asker` is the requesting agent (the KQML sender). Reports, per place,
+    only the years still missing here."""
     names = slot.spatial if isinstance(slot.spatial, list) else [slot.spatial]
     years, attributes = list(slot.temporal), list(slot.attributes)
     entity_type = getattr(slot, "entity_type", None) or DEFAULT_ENTITY_TYPE
     queries: List[str] = []
 
-    question = f"Agent-2 asks for {', '.join(attributes)} of {', '.join(names)} in {years}"
+    question = f"{asker} asks for {', '.join(attributes)} of {', '.join(names)} in {years}"
     by_slot = fetch_values(question, names, years, attributes, entity_type, queries)
     found, _gaps, _diagnosis = detect_gaps(names, years, attributes, by_slot, entity_type)
 
-    satisfied = {(r.state, r.year) for r in found}
+    satisfied = {(r.spatial, r.year) for r in found}
     missing_by_state = {n: [y for y in years if (n, y) not in satisfied] for n in names}
     missing_by_state = {n: ys for n, ys in missing_by_state.items() if ys}
 
-    return {"found": [{"spatial": r.state, "year": r.year, **r.values} for r in found],
+    return {"found": [{"spatial": r.spatial, "year": r.year, **r.values} for r in found],
             "missing": list(missing_by_state),
             "missing_by_state": missing_by_state,
             "queries": queries}
 
 
 def shapes_for_peer(slots) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Answer Agent-2's :missing-geometries entries from our own shapes.
+    """Answer a peer's :missing-geometries entries from our own shapes.
     Returns (found_geometries, missing_geometries) in wire form."""
     pairs = [(s.spatial_entity, s.entity_type) for s in slots]
     shapes, missing = fetch_shapes(pairs, [])
