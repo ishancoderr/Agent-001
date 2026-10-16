@@ -22,8 +22,11 @@ steps:
       with the reference shape. The relationship is in spatial_relationship.type:
       "adjacency" = ST_Intersects(candidate, reference) AND NOT
       ST_Equals(candidate, reference); "north_of" / "south_of" / "east_of" /
-      "west_of" = degrees(ST_Azimuth(ST_Centroid(reference), ST_Centroid(candidate)))
-      in the sector given for that kind (${direction_sectors}), ordered by that bearing; "distance" =
+      "west_of" = the bearing degrees(ST_Azimuth(ST_Centroid(reference),
+      ST_Centroid(candidate))) inside the sector :az_start to :az_end (degrees clockwise
+      from north; :az_end passes 360 for a sector through north), tested as "bearing
+      BETWEEN :az_start AND :az_end OR bearing + 360 BETWEEN :az_start AND :az_end",
+      ordered by that bearing; "distance" =
       ST_DWithin(candidate::geography, reference::geography, :dist_m), ordered
       by ST_Distance on geography. Never return the reference itself (exclude
       the name :ref). Turn :names and :wkts into rows with unnest(), building
@@ -38,6 +41,8 @@ steps:
       ref_wkt:  'text — WKT of the reference shape'
       ref_srid: 'int — SRID of the reference shape'
       dist_m:   'float — distance in metres (only used for "distance")'
+      az_start: 'int — first bearing of the direction sector (only used for a direction)'
+      az_end:   'int — last bearing of the sector, greater than :az_start (only used for a direction)'
 
     columns: 'entity_name only.'
 
@@ -52,7 +57,7 @@ steps:
           question: "Which states lie west of Berlin?"
           spatial_relationship: {type: west_of, refs: ["Berlin"]}
         output:
-          sql: "WITH cand(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, :cand_srid) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(n, w)), ref(shape) AS (SELECT ST_GeomFromText(:ref_wkt, :ref_srid)), bearing(entity_name, az) AS (SELECT cand.entity_name, degrees(ST_Azimuth(ST_Centroid(ref.shape), ST_Centroid(cand.shape))) FROM cand, ref WHERE cand.entity_name <> :ref) SELECT bearing.entity_name AS entity_name FROM bearing WHERE bearing.az >= 225 AND bearing.az <= 315 ORDER BY bearing.az"
+          sql: "WITH cand(entity_name, shape) AS (SELECT n, ST_GeomFromText(w, :cand_srid) FROM unnest(CAST(:names AS text[]), CAST(:wkts AS text[])) AS t(n, w)), ref(shape) AS (SELECT ST_GeomFromText(:ref_wkt, :ref_srid)), bearing(entity_name, az) AS (SELECT cand.entity_name, degrees(ST_Azimuth(ST_Centroid(ref.shape), ST_Centroid(cand.shape))) FROM cand, ref WHERE cand.entity_name <> :ref) SELECT bearing.entity_name AS entity_name FROM bearing WHERE bearing.az BETWEEN :az_start AND :az_end OR bearing.az + 360 BETWEEN :az_start AND :az_end ORDER BY bearing.az"
 
       - input:
           question: "Which states are within 150 km of Hamburg?"

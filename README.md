@@ -86,7 +86,7 @@ QueryResponse
   .status  = "complete" | "partial-complete" | "not-found"
   .query   = {type, spatial, temporal, attributes, entity_type}
   .data    = {complete: [...], partial: [...], missing: [...]}
-  .provenance = {kqml_turns, records_from_agent_1, records_from_agent_2, ...}
+  .provenance = {kqml_turns, records_local, records_peer, records_from_both, ...}
 ```
 
 `GEOMETRY_LOOKUP` and `SPATIAL_OPERATION` (shape combination — union, intersection,
@@ -128,7 +128,7 @@ Agent-001/
 └── agent1/
     ├── main.py                      ← FastAPI app + startup kqml-messaging version check
     ├── database.py                  ← SQLAlchemy engine + SessionLocal
-    ├── .env                         ← DB credentials, AGENT2_URL, OPENAI_API_KEY, model overrides
+    ├── .env                         ← DB credentials, AGENT_NAME, PEER_AGENTS, OPENAI_API_KEY, models
     │
     ├── controller/
     │   ├── query_controller.py      ← POST /query   GET /health
@@ -277,7 +277,9 @@ DB_USER=postgres
 DB_PASS=your_password
 DB_NAME=geostats_agent1
 
-AGENT2_URL=http://localhost:8001
+# who this agent is, and the peers it may ask (name=url, comma-separated)
+AGENT_NAME=Agent-1
+PEER_AGENTS=Agent-2=http://localhost:8001
 
 OPENAI_API_KEY=sk-proj-...
 
@@ -287,8 +289,8 @@ OPENAI_API_KEY=sk-proj-...
 # SQL_MODEL=gpt-4o-mini
 ```
 
-To add a third or fourth agent later, just add `AGENT3_URL=...` / `AGENT4_URL=...` — no
-code change needed.
+To add a third or fourth agent later, add it to `PEER_AGENTS`
+(`Agent-2=http://localhost:8001,Agent-3=http://localhost:8002`) — no code change needed.
 
 ### 3. Install dependencies and run
 

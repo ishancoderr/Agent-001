@@ -26,14 +26,14 @@ steps:
 
     examples:
       - input:
-          question: "Give me one combined boundary for Bayern and Sachsen."
+          question: "Union of these two shapes"
           operation: Union
           spatial: ["Bayern", "Sachsen"]
         output:
           sql: "SELECT ST_AsText(ST_Union(ST_GeomFromText(:wkt_a, :srid_a), ST_GeomFromText(:wkt_b, :srid_b))) AS wkt"
 
       - input:
-          question: "Give me Brandenburg with Berlin removed."
+          question: "Difference of these two shapes"
           operation: Difference
           spatial: ["Brandenburg", "Berlin"]
         output:

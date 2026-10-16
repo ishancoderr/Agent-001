@@ -11,6 +11,11 @@
 # `aliases` replace prompt rules that used to be written by hand ("married",
 # "marriage", "marriages" -> always output "marriages"). Listed here, the rule
 # is generated into the prompt instead of maintained in two places.
+#
+# `aggregate` says how a column's values combine across places when a question
+# asks for them together ("the combined population of Hessen and Thüringen").
+# Only counts add up: leave it out for a rate, a share or a density, and the
+# agent returns the separate values without a total (agent1/result/totals.py).
 
 version: 1
 
@@ -25,14 +30,17 @@ attribute_tables:
         label:   "population"
         type:    integer
         aliases: [people, inhabitants, residents]
+        aggregate: sum
       marriages:
         label:   "marriages"
         type:    integer
         aliases: [married, marriage]
+        aggregate: sum
       live_births:
         label:   "live births"
         type:    integer
         aliases: [births, "live birth", live_birth]
+        aggregate: sum
 
 # ── Adding an attribute table ────────────────────────────────────────────────
 #

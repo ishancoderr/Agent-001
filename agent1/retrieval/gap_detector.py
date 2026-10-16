@@ -147,6 +147,14 @@ def _peer():
 # VALUES — Scenarios 1-8
 # ═══════════════════════════════════════════════════════════════════════════
 
+def fetch_question(attributes: List[str], names: List[str], years: List[int]) -> str:
+    """The question the fetch step is written for: its own parameters, never
+    the user's wording — "the total population of ..." only tempts the model
+    to add the rows up in SQL, and the gap detector must see them one by one.
+    A peer's ask is phrased the same way (lookup_for_peer)."""
+    return f"Fetch {', '.join(attributes)} of {', '.join(names)} in {years}"
+
+
 def fetch_values(question: str, names: List[str], years: List[int], attributes: List[str],
                  entity_type: str, queries: List[str]) -> Dict[Tuple[str, int], Dict[str, Any]]:
     """Steps 1-2: SqlWriter writes the fetch, it runs, and every returned row
@@ -234,7 +242,8 @@ def answer_query(params: QueryParams) -> AnsweredQuery:
     exchange = Exchange()
 
     t0 = time.perf_counter()
-    by_slot = fetch_values(params.raw_query, names, params.temporal, params.attributes, entity_type, queries)
+    by_slot = fetch_values(fetch_question(params.attributes, names, params.temporal),
+                           names, params.temporal, params.attributes, entity_type, queries)
     no_rows = [n for n in names if not any((n, y) in by_slot for y in params.temporal)]
     held = (held_anywhere(no_rows, entity_type, queries) | (set(names) - set(no_rows))
             if no_rows else set(names))

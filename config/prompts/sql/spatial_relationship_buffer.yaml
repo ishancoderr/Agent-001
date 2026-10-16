@@ -33,13 +33,43 @@ steps:
         output:
           sql: "SELECT ST_AsText(ST_Buffer(ST_GeomFromText(:ref_wkt, :ref_srid)::geography, :dist_m)::geometry) AS wkt, :ref_srid AS srid"
 
+  sector:
+    task: 'Build the area lying in one compass direction of the reference shape: a
+      wedge from the reference shape''s centroid between the bearings :az_start and
+      :az_end (degrees clockwise from north; :az_end may pass 360), reaching :radius_m
+      metres — arc points made with ST_Project on geography every 5 degrees
+      (generate_series), joined into a polygon that starts and ends at the centroid —
+      with the reference shape itself removed (ST_Difference). Return it as WKT with
+      its SRID.'
+
+    placeholders:
+      ref_wkt:  'text — WKT of the reference shape (a city point or a state area)'
+      ref_srid: 'int — SRID of the reference shape'
+      radius_m: 'float — how far the wedge reaches, in metres'
+      az_start: 'int — first bearing of the sector, in degrees'
+      az_end:   'int — last bearing, greater than :az_start (405 means 45 degrees past north)'
+
+    must_use: [ref_wkt, ref_srid, radius_m, az_start, az_end]
+
+    columns: 'wkt (ST_AsText of the area), srid.'
+
+    examples:
+      - input:
+          question: "Which cities lie north of Bayern?"
+          spatial: ["Bayern"]
+          direction: north_of
+          radius_km: 1000
+        output:
+          sql: "WITH ref(shape) AS (SELECT ST_GeomFromText(:ref_wkt, :ref_srid)), bearings(a) AS (SELECT generate_series(CAST(:az_start AS int), CAST(:az_end AS int), 5)), arc(a, pt) AS (SELECT bearings.a, ST_Project(ST_Centroid(ref.shape)::geography, :radius_m, radians(bearings.a))::geometry FROM ref, bearings) SELECT ST_AsText(ST_Difference(ST_MakePolygon(ST_AddPoint(ST_AddPoint(ST_MakeLine(array_agg(arc.pt ORDER BY arc.a)), ST_Centroid(ref.shape), 0), ST_Centroid(ref.shape))), ref.shape)) AS wkt, :ref_srid AS srid FROM arc, ref GROUP BY ref.shape"
+
   within:
     task: 'Return every member of the requested target_entity, from that entity
       type''s own table in the schema above, whose shape falls inside the given
       zone: a point shape must lie within the zone (ST_Within), a line or
       polygon shape must intersect it (ST_Intersects). Use the table''s name
-      column and shape column as the schema lists them. Skip rows whose shape
-      is NULL and every name in :exclude. The zone is given only as :zone_wkt —
+      column and shape column as the schema lists them. Skip every name in
+      :exclude (a row with a NULL shape never passes the test, so it needs no
+      separate check). The zone is given only as :zone_wkt —
       even when the question names a place ("cities in Hessen"), never join
       that place''s table to rebuild it.'
 
@@ -54,7 +84,7 @@ steps:
 
     examples:
       - input:
-          question: "Which cities lie within 100 km of Dortmund?"
+          question: "Which of our cities lie inside this zone?"
           target_entity: city
         output:
-          sql: "SELECT c.city_name AS entity_name, ST_AsText(c.centroid) AS wkt, ST_SRID(c.centroid) AS srid FROM cities c WHERE c.centroid IS NOT NULL AND ST_Within(c.centroid, ST_GeomFromText(:zone_wkt, :zone_srid)) AND NOT (c.city_name = ANY(:exclude))"
+          sql: "SELECT c.city_name AS entity_name, ST_AsText(c.centroid) AS wkt, ST_SRID(c.centroid) AS srid FROM cities c WHERE ST_Within(c.centroid, ST_GeomFromText(:zone_wkt, :zone_srid)) AND NOT (c.city_name = ANY(:exclude))"

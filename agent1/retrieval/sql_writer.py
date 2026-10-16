@@ -58,6 +58,9 @@ _ATTRIBUTE_TABLES: list = yaml.safe_load(
 )["attribute_tables"]
 _RULES: dict = yaml.safe_load((_SQL_PROMPTS / "rules.yaml").read_text(encoding="utf-8"))
 
+# Combining rows in SQL — refused for a step marked `no_aggregation: true`.
+_AGGREGATION = re.compile(r"\b(?:SUM|AVG|COUNT|MIN|MAX)\s*\(|\bGROUP\s+BY\b|\bHAVING\b", re.IGNORECASE)
+
 # A :name placeholder, but not the second colon of a `::type` cast.
 _PLACEHOLDER = re.compile(r"(?<![:\w]):([A-Za-z_]\w*)")
 
@@ -347,6 +350,7 @@ class SqlWriter:
         self.tokens_used = 0
         self._prompts: Dict[str, str] = {}
         self._must_use: Dict[str, List[str]] = {}
+        self._no_aggregation: Dict[str, bool] = {}
 
     def _system_prompt(self, category: str, step: str) -> str:
         """rules.yaml + this category's step (task, placeholders, columns,
@@ -370,6 +374,9 @@ class SqlWriter:
         if unknown:
             raise ValueError(f"{path.name} step {step!r}: must_use names unknown placeholder(s) {sorted(unknown)}")
         self._must_use[key] = must_use
+        # A step whose rows are read one stored value at a time (the gap
+        # detector) must not let the model combine them in SQL.
+        self._no_aggregation[key] = bool(spec.get("no_aggregation"))
 
         placeholders = "\n".join(f"  - :{name} — {desc}" for name, desc in spec["placeholders"].items())
         if must_use:
@@ -398,7 +405,8 @@ class SqlWriter:
         return prompt
 
     def write(self, question: str, category: str, step: str, shown: Dict[str, Any],
-              bind: Dict[str, Any], label: str = "", previous_error: str = "") -> BuiltQuery:
+              bind: Dict[str, Any], label: str = "", previous_error: str = "",
+              must_use: Iterable[str] = ()) -> BuiltQuery:
         """Ask the model for one statement.
 
         `shown` is what the model sees besides the question (the extracted
@@ -438,10 +446,16 @@ class SqlWriter:
         unknown = used - set(bind)
         if unknown:
             raise ValueError(f"SQL uses placeholder(s) the caller does not bind: {sorted(unknown)}")
-        skipped = [n for n in self._must_use[f"{category}:{step}"] if n not in used]
+        # The step's own must_use (its prompt file), plus any the caller adds for
+        # this one statement — e.g. a direction's sector, which a step shared
+        # with adjacency and distance cannot require for every kind.
+        skipped = [n for n in [*self._must_use[f"{category}:{step}"], *must_use] if n not in used]
         if skipped:
             raise ValueError(f"SQL must use placeholder(s) {[':' + n for n in skipped]} — they are given; "
                              "do not look these values up from a table")
+        if self._no_aggregation[f"{category}:{step}"] and _AGGREGATION.search(sql):
+            raise ValueError("This step returns the stored rows one per place and year — no SUM/AVG/COUNT/"
+                             "MIN/MAX, GROUP BY or HAVING; totals are computed afterwards")
 
         return BuiltQuery(sql=sql, params=bind, readable=_readable(sql, bind),
                           label=label or f"{category}/{step}")
@@ -460,14 +474,16 @@ def writer() -> SqlWriter:
 
 
 def write_and_run(question: str, category: str, step: str, shown: Dict[str, Any], bind: Dict[str, Any],
-                  required: Iterable[str], queries: List[str], label: str = "") -> List[Dict[str, Any]]:
+                  required: Iterable[str], queries: List[str], label: str = "",
+                  must_use: Iterable[str] = ()) -> List[Dict[str, Any]]:
     """Write a statement, run it, return its rows. If the statement fails a
     check or the database rejects it, the error goes back to the model once
     so it can correct itself; a second failure is raised."""
     error = ""
     for attempt in (1, 2):
         try:
-            built = writer().write(question, category, step, shown, bind, label, previous_error=error)
+            built = writer().write(question, category, step, shown, bind, label, previous_error=error,
+                                   must_use=must_use)
             return run(built, required, queries)
         except Exception as exc:                    # noqa: BLE001 — retried once, then raised
             if attempt == 2:

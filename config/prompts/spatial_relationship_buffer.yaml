@@ -36,7 +36,11 @@ output_notes: '"spatial" holds the single reference place (a city or a state) th
   "distance_km" is the distance in kilometres named in the query; 0 when the query asks
   for the cities IN / INSIDE / WITHIN the place itself and names no distance ("cities in
   Hessen", "cities within Bayern"); ${default_distance_km} when it only says "near" or "close to" without
-  a number. "target_entity" is always "city". Do not include attributes or temporal fields.'
+  a number. "target_entity" is always "city". Do not include attributes or temporal fields.
+  When the query asks for the cities north / south / east / west of the place, add
+  "direction" (one of ${direction_names}); "distance_km" is then the limit in km if the
+  query names one ("within 40 km east of Kassel"), else null. Leave "direction" out
+  otherwise.'
 
 examples:
   - query: "Which cities lie within 100 km of Dortmund?"
@@ -47,6 +51,12 @@ examples:
 
   - query: "Which cities are in Hessen?"
     output: {spatial: ["Hessen"], operations: ["Buffer", "Within"], distance_km: 0, target_entity: "city"}
+
+  - query: "Which cities lie north of Bayern?"
+    output: {spatial: ["Bayern"], operations: ["Buffer", "Within"], distance_km: null, target_entity: "city", direction: "north_of"}
+
+  - query: "Which cities are within 40 km east of Kassel?"
+    output: {spatial: ["Kassel"], operations: ["Buffer", "Within"], distance_km: 40, target_entity: "city", direction: "east_of"}
 
   - query: "Give me the cities within 20 km of Thüringen"
     output: {spatial: ["Thüringen"], operations: ["Buffer", "Within"], distance_km: 20, target_entity: "city"}

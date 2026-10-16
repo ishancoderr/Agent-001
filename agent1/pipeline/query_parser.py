@@ -32,9 +32,9 @@ from typing import Any, Dict, List, Tuple
 from dotenv import load_dotenv
 
 from .query_extractor import QueryExtractor
-from ..settings import DEFAULT_DISTANCE_KM
+from ..settings import DATA_OPERATIONS, DEFAULT_DISTANCE_KM, DIRECTION_SECTORS
 from .gazetteer import entity_type_of
-from .query_params import (QueryParams,
+from .query_params import (QueryParams, ATTRIBUTE_AGGREGATE,
                            DEFAULT_ENTITY_TYPE, DEFAULT_ZONE_TARGET, RELATIONSHIP_TYPES, SpatialRelationship,
                            UNLISTED_NAME_DEFAULT, VALID_ATTRS, VALID_ENTITY_TYPES, VALID_OPERATIONS,
                            VALID_QUERY_TYPES, ZONE_SEARCH_TYPES, default_attribute_for)
@@ -182,12 +182,37 @@ class QueryParamsBuilder:
                 target_entity = (data.get("target_entity")
                                  if data.get("target_entity") in ZONE_SEARCH_TYPES and operation != "BufferWithin"
                                  else None)
-                log.info("       | SPATIAL_OPERATION : op=%s spatial=%s entity_type=%s distance_km=%s target=%s",
-                         operation, names, entity_type, distance_km, target_entity)
+                # "...and give me its population for 2017" — the new shape's data:
+                # the places' values combined per year. Only for an operation in
+                # settings.yaml data_operations (a union holds exactly its places'
+                # values), and attributes attributes.yaml says combine.
+                attributes = _attributes_from(data, query_type, entity_type)
+                temporal: List[int] = []
+                aggregate = None
+                if attributes:
+                    kinds = {ATTRIBUTE_AGGREGATE.get(a) for a in attributes}
+                    if operation not in DATA_OPERATIONS or len(kinds) != 1 or None in kinds:
+                        log.warning("       | %s of %s asked for %s - that data cannot be derived "
+                                    "from the places' values; returning the shape only",
+                                    operation, names, attributes)
+                        attributes = []
+                    else:
+                        aggregate = next(iter(kinds))
+                        temporal = _years_from(data)
+                        if not temporal:
+                            log.warning("       | %s requested but no year was named or implied - rejecting",
+                                        ", ".join(attributes))
+                            return QueryParams(
+                                query_type="NEEDS_YEAR", spatial=[], temporal=[], attributes=attributes,
+                                raw_query=original_query, **_trace(),
+                            ), tokens_consumed
+                log.info("       | SPATIAL_OPERATION : op=%s spatial=%s entity_type=%s distance_km=%s target=%s"
+                         " attributes=%s temporal=%s", operation, names, entity_type, distance_km,
+                         target_entity, attributes, temporal)
                 return QueryParams(
-                    query_type="SPATIAL_OPERATION", spatial=names, temporal=[], attributes=[],
+                    query_type="SPATIAL_OPERATION", spatial=names, temporal=temporal, attributes=attributes,
                     raw_query=original_query, operation=operation, entity_type=entity_type,
-                    distance_km=distance_km, target_entity=target_entity, **_trace(),
+                    distance_km=distance_km, target_entity=target_entity, aggregate=aggregate, **_trace(),
                 ), tokens_consumed
             # An operation needs a verb and two shapes; without them there is
             # nothing to construct, so answer it as a data lookup.
@@ -213,12 +238,22 @@ class QueryParamsBuilder:
                 # entities.yaml, or the first such type when none is named.
                 target_entity = (data.get("target_entity")
                                  if data.get("target_entity") in ZONE_SEARCH_TYPES else DEFAULT_ZONE_TARGET)
-                log.info("       | SPATIAL_RELATIONSHIP_BUFFER : ref=%s distance_km=%s target=%s",
-                         refs, distance_km, target_entity)
+                # "Cities north of Bayern": a direction (settings.yaml
+                # direction_sectors) instead of a distance; a distance, when
+                # named, limits how far the direction reaches.
+                direction = data.get("direction")
+                if direction and direction not in DIRECTION_SECTORS:
+                    log.warning("       | Unknown direction %r - searching by distance instead", direction)
+                    direction = None
+                if direction:
+                    named = data.get("distance_km")
+                    distance_km = float(named) if isinstance(named, (int, float)) and named > 0 else None
+                log.info("       | SPATIAL_RELATIONSHIP_BUFFER : ref=%s distance_km=%s direction=%s target=%s",
+                         refs, distance_km, direction, target_entity)
                 return QueryParams(
                     query_type="SPATIAL_RELATIONSHIP_BUFFER", spatial=refs,
                     temporal=[], attributes=[], raw_query=original_query,
-                    distance_km=distance_km,
+                    distance_km=distance_km, direction=direction,
                     target_entity=target_entity, **_trace(),
                 ), tokens_consumed
             # No reference to build a zone around.
@@ -268,6 +303,14 @@ class QueryParamsBuilder:
                 raw_query=original_query, **_trace(),
             ), tokens_consumed
 
+        # "Combined / total / merged area of X and Y": the places' values are
+        # combined, but only for attributes attributes.yaml says combine that way.
+        aggregate = data.get("aggregate") if query_type == "DIRECT_LOOKUP" else None
+        if aggregate and not all(ATTRIBUTE_AGGREGATE.get(a) == aggregate for a in attributes):
+            log.warning("       | Aggregate %r is not defined for %s in attributes.yaml - "
+                        "returning the values without a total", aggregate, attributes)
+            aggregate = None
+
         spatial = data.get("spatial", "all")
         if spatial == "all" or spatial is None or not isinstance(spatial, (str, list)):
             spatial = ["all"]
@@ -300,11 +343,13 @@ class QueryParamsBuilder:
         log.info("       | Attributes  : %s", attributes)
         log.info("       | Spatial     : %s", spatial)
         log.info("       | Entity type : %s", entity_type or f"(default: {DEFAULT_ENTITY_TYPE})")
+        if aggregate:
+            log.info("       | Aggregate   : %s across the places", aggregate)
         log.info("       | Tokens      : classify=%d  extract=%d  total=%d",
                  tokens_classify, tokens_consumed - tokens_classify, tokens_consumed)
 
         return QueryParams(
             query_type=query_type, spatial=spatial, temporal=temporal,
             attributes=attributes, spatial_relationship=relationship,
-            entity_type=entity_type, raw_query=original_query, **_trace(),
+            entity_type=entity_type, aggregate=aggregate, raw_query=original_query, **_trace(),
         ), tokens_consumed

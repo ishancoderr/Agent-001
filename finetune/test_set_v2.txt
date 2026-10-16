@@ -1,0 +1,117 @@
+# Test set v2 — 100 unseen questions (95 across all question types + 5 unrelated)
+
+# Data (values, ranges, all states, English names, missing years, no year, combined totals)
+1: What was the population of Brandenburg in 2018?
+2: How many marriages took place in Sachsen-Anhalt in 2016?
+3: Give me the live births in Rheinland-Pfalz for 2019.
+4: Population of Hamburg and Bremen in 2020
+5: Show the marriages in Bayern from 2016 to 2019.
+6: How many babies were born in Schleswig-Holstein in 2017 and 2018?
+7: Population, marriages and live births of Saarland in 2015
+8: What was the population of every German state in 2019?
+9: How many inhabitants did Lower Saxony have in 2021?
+10: Marriages in North Rhine-Westphalia in 2022
+11: Population of Thuringia in 1995
+12: How many people live in Mecklenburg-Vorpommern?
+13: Give me the live births of Berlin
+14: What was the combined population of Brandenburg and Sachsen in 2018?
+15: Total marriages in Hessen, Bayern and Baden-Württemberg in 2017
+16: How many people lived in Niedersachsen and Bremen together from 2016 to 2018?
+17: Population of Bavaria in 2030
+18: What is the combined number of marriages of Berlin and Brandenburg?
+
+# Geometry (states, cities, mixed, English names, all states)
+19: Show me the boundary of Niedersachsen
+20: Give me the shape of Baden-Württemberg as WKT
+21: What are the coordinates of the city of Leipzig?
+22: Return the geometries of Saarland and Rheinland-Pfalz
+23: Where is Freiburg im Breisgau located?
+24: Give me the polygon of Bavaria
+25: Shapes of Kiel, Lübeck and Rostock
+26: Show the outline of Schleswig-Holstein and the location of Flensburg
+27: Get the geometry of the state of Bremen
+28: Give me the point for Hamburg the city
+29: Boundaries of all German federal states
+30: Where is Görlitz?
+
+# Spatial operations (union, intersection, difference, symmetric difference, named-target buffer, merge then cities, merge then data)
+31: Merge Sachsen and Thüringen into one shape
+32: Give me the union of Nordrhein-Westfalen, Hessen and Niedersachsen
+33: Combine Rheinland-Pfalz and Saarland into a single region
+34: Create one area from Bayern and Baden-Württemberg
+35: What area do Brandenburg and Berlin share?
+36: Intersect Hessen with Nordrhein-Westfalen
+37: Give me Niedersachsen with Bremen removed
+38: Show Brandenburg minus Berlin
+39: Which areas belong to either Sachsen or Bayern but not both?
+40: Symmetric difference of Hessen and Thüringen
+41: Which of Hessen and Bayern lie within 80 km of Würzburg?
+42: Which of Thüringen and Bayern lie within 40 km of Coburg?
+43: Join Niedersachsen and Schleswig-Holstein into one area and tell me which cities are inside it
+44: Combine Brandenburg and Mecklenburg-Vorpommern and list the cities inside the merged area
+45: Which cities remain in Brandenburg after Berlin is cut out?
+46: Merge Schleswig-Holstein and Hamburg into one area and tell me the population of that area in 2019
+47: Join Sachsen and Sachsen-Anhalt into one shape and give me the total live births for 2016
+
+# Cities in a zone (around a city, in a direction, inside a state, around a state)
+48: Which cities are within 25 km of Erfurt?
+49: Show me cities within 60 km of Hannover
+50: What cities lie within 10 km of Potsdam?
+51: Which cities lie north of Baden-Württemberg?
+52: Which towns are near Kassel?
+53: What cities are south of Niedersachsen?
+54: List the cities east of Würzburg
+55: Cities within 15.5 km of Heidelberg
+56: Which cities are in Baden-Württemberg?
+57: List all the cities inside Thüringen
+58: What cities are located within Schleswig-Holstein?
+59: Which cities does Saarland contain?
+60: Which cities lie within 20 km of Hessen?
+61: Which cities lie within 30 km of Saarland?
+
+# Adjacency (lists, yes/no, "both", with data)
+62: Which states border Niedersachsen?
+63: What are the neighbouring states of Bayern?
+64: Which federal states share a border with Mecklenburg-Vorpommern?
+65: Does Hessen border Bayern?
+66: Is Saarland adjacent to Baden-Württemberg?
+67: Which states touch Brandenburg?
+68: Who are the neighbours of Rheinland-Pfalz?
+69: Which state borders both Sachsen and Bayern?
+70: What was the population of the states bordering Hessen in 2018?
+71: Give me the marriages in 2017 of every state that borders Thüringen
+72: Do Bremen and Hamburg share a border?
+73: Which states border Hamburg?
+
+# Direction (lists, yes/no, with data)
+74: Which states lie south of Hessen?
+75: What states are east of Nordrhein-Westfalen?
+76: Which federal states are west of Sachsen?
+77: Is Bayern south of Thüringen?
+78: Which states are north of Bayern?
+79: Is Hamburg north of Bremen?
+80: Which states lie east of Niedersachsen?
+81: States to the west of Brandenburg
+82: Is Saarland west of Hessen?
+83: What was the population in 2019 of the states north of Hessen?
+84: Which states are located south of Schleswig-Holstein?
+
+# Distance (states near a city or state, yes/no, with data)
+85: Which states are within 50 km of Göttingen?
+86: Which federal states lie within 120 km of Nürnberg?
+87: States within 30 km of Mannheim
+88: Is Thüringen within 100 km of Hannover?
+89: Which states are within 200 km of Leipzig?
+90: Which states lie within 75 km of Magdeburg?
+91: Is Bremen within 150 km of Hamburg?
+92: Which states are within 40 km of Saarland?
+93: Which states lie within 60 km of Frankfurt am Main?
+94: Give me the live births in 2016 of the states within 100 km of Kassel
+95: Which states are within 90 km of Rostock?
+
+# Unrelated (must be rejected)
+96: What is the population of Amsterdam?
+97: Which cities lie within 25 km of Basel?
+98: How do I bake sourdough bread?
+99: Who won the 2014 football World Cup?
+100: Which states border Texas?

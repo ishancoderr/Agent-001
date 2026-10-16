@@ -104,6 +104,18 @@ def _fmt_kqml(m: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _fmt_totals(m: Dict[str, Any]) -> str:
+    """Totals across places, when the question asked for them (result/totals.py)."""
+    if not m.get("totals"):
+        return ""
+    lines = [f"  Total {t['attribute']} {t['year']:<6}: {t['total'] if t['total'] is not None else 'none'}"
+             + (f"   (missing: {', '.join(t['missing'])})" if t["missing"] else "")
+             for t in m["totals"]]
+    if m.get("full_total_years") is not None:
+        lines.append(f"  Full total available  : {m['full_total_years'] or 'no nearby year'}")
+    return "\n".join(lines) + "\n"
+
+
 def log_evaluation_metrics(metrics: Dict[str, Any]) -> None:
     """Write one evaluation block to evaluation_metrics.log."""
     m = metrics
@@ -120,6 +132,7 @@ def log_evaluation_metrics(metrics: Dict[str, Any]) -> None:
         f"{_SEP}\n"
         f"STEP 5 — RESULT\n"
         f"  Status                : {m.get('status', 'n/a')}\n"
+        f"{_fmt_totals(m)}"
         f"{_SEP}\n"
         f"TIMING\n"
         f"  Phase 1 (local)       : {m.get('phase1_ms', 0):>6.0f} ms   (parse + spatial + DB)\n"

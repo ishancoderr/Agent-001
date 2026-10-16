@@ -40,7 +40,10 @@ from agent1.pipeline.prompt_loader import CATEGORY_CANDIDATE_TYPES, CLASSIFY_SYS
 from agent1.messaging.agent_registry import AGENT_NAME, AGENT_REGISTRY
 from agent1.pipeline.query_params import (DEFAULT_ENTITY_TYPE, DEFAULT_ZONE_TARGET, UNLISTED_NAME_DEFAULT,
                                           ZONE_SEARCH_TYPES, entity_label)
-from agent1.settings import DEFAULT_DISTANCE_KM, PLACE_REFERENCE_KINDS, relationship_kind, relationship_wording
+from agent1.settings import (DEFAULT_DISTANCE_KM, DIRECTION_SEARCH_RADIUS_KM, PLACE_REFERENCE_KINDS,
+                             relationship_kind, relationship_wording)
+from agent1.retrieval.gap_detector import fetch_question
+from agent1.retrieval.spatial_compute import operation_question, zone_question
 from agent1.retrieval.sql_writer import _PLACEHOLDER, SqlWriter, validate_sql
 
 from . import reference_sql as ref
@@ -141,7 +144,8 @@ def data_calls(q: Dict[str, Any]) -> List[Dict[str, Any]]:
     years, attributes = ex["temporal"], ex["attributes"]
     fetch_sql = ref.value_fetch(entity_type, attributes)
     shown = {"entity_type": entity_type, "spatial": names, "temporal": years, "attributes": attributes}
-    calls = [sql_call("DIRECT_LOOKUP", "fetch", raw, shown, ["names", "years"], fetch_sql)]
+    calls = [sql_call("DIRECT_LOOKUP", "fetch", fetch_question(attributes, names, years), shown,
+                      ["names", "years"], fetch_sql)]
     if q.get("presence"):
         places = q["presence"]
         calls.append(sql_call("DIRECT_LOOKUP", "presence",
@@ -169,13 +173,21 @@ def operation_calls(q: Dict[str, Any]) -> List[Dict[str, Any]]:
                      {"operation": operation, "spatial": names, "distance_km": float(ex.get("distance_km") or DEFAULT_DISTANCE_KM)},
                      ["ref_wkt", "ref_srid", "dist_m", "names", "wkts", "cand_srid"], ref.BUFFER_WITHIN)]
     calls = shape_fetch_calls([(n, entity_type) for n in names]) + [
-        sql_call("SPATIAL_OPERATION", "compute", raw, {"operation": operation, "spatial": names},
+        sql_call("SPATIAL_OPERATION", "compute", operation_question(operation), {"operation": operation, "spatial": names},
                  ["wkt_a", "srid_a", "wkt_b", "srid_b"], ref.operation(operation))]
+    if ex.get("attributes"):
+        # "...and give me its population for 2017": the merged area's data is
+        # the places' values, fetched with the DIRECT_LOOKUP fetch step.
+        years, attributes = ex.get("temporal") or [], ex["attributes"]
+        calls.append(sql_call("DIRECT_LOOKUP", "fetch", fetch_question(attributes, names, years),
+                              {"entity_type": entity_type, "spatial": names, "temporal": years, "attributes": attributes},
+                              ["names", "years"], ref.value_fetch(entity_type, attributes),
+                              title="SQL · the merged area's data"))
     target = ex.get("target_entity")
     if target in ZONE_SEARCH_TYPES:
         # "...and which cities lie inside it?" — spatial_compute.run_operation()
         # searches the new shape with the same "within" step Scenario 20 uses.
-        calls.append(sql_call("SPATIAL_RELATIONSHIP_BUFFER", "within", raw,
+        calls.append(sql_call("SPATIAL_RELATIONSHIP_BUFFER", "within", zone_question(target),
                               {"target_entity": target, "exclude": []},
                               ["zone_wkt", "zone_srid", "exclude"], ref.within(target),
                               title=f"SQL · {entity_label(target)} inside the new shape"))
@@ -200,7 +212,8 @@ def relationship_calls(q: Dict[str, Any]) -> List[Dict[str, Any]]:
         f"Which of the candidate {entity_label(cand_type)} {wording} {', '.join(rel['refs'])}?",
         {"spatial_relationship": {"type": kind, "refs": rel["refs"], "subject": subject,
                                   "distance_km": rel.get("distance_km")}},
-        ["names", "wkts", "cand_srid", "ref", "ref_wkt", "ref_srid", "dist_m"], ref.relationship(kind)))
+        ["names", "wkts", "cand_srid", "ref", "ref_wkt", "ref_srid", "dist_m", "az_start", "az_end"],
+        ref.relationship(kind)))
     if q["extract"].get("attributes"):
         calls[-1]["meta"]["note"] = ("the data fetch for the resulting states follows; it is the "
                                      "DIRECT_LOOKUP fetch pattern and depends on the map, so not generated here")
@@ -215,14 +228,23 @@ def delegation_calls(q: Dict[str, Any]) -> List[Dict[str, Any]]:
     # reference is excluded only when it is of the type searched for.
     ref_type = entity_type_of(ex["spatial"][0], UNLISTED_NAME_DEFAULT)
     ref_name = normalize_entity_name(ex["spatial"][0], ref_type)
-    distance_km = DEFAULT_DISTANCE_KM if ex.get("distance_km") is None else float(ex["distance_km"])
     own = [ref_name] if ref_type == target else []
     calls = shape_fetch_calls([(ex["spatial"][0], ref_type)])
-    if distance_km:
+    direction = ex.get("direction")
+    distance_km = (ex.get("distance_km") if direction
+                   else DEFAULT_DISTANCE_KM if ex.get("distance_km") is None else float(ex["distance_km"]))
+    if direction:
+        # "Cities north of Bayern": the wedge in that direction (buffer_query()).
+        calls.append(sql_call("SPATIAL_RELATIONSHIP_BUFFER", "sector", raw,
+                              {"spatial": ex["spatial"], "direction": direction,
+                               "radius_km": float(distance_km or DIRECTION_SEARCH_RADIUS_KM)},
+                              ["ref_wkt", "ref_srid", "radius_m", "az_start", "az_end"], ref.SECTOR))
+    elif distance_km:
         calls.append(sql_call("SPATIAL_RELATIONSHIP_BUFFER", "zone", raw,
                               {"spatial": ex["spatial"], "distance_km": distance_km},
                               ["ref_wkt", "ref_srid", "dist_m"], ref.ZONE))
-    calls.append(sql_call("SPATIAL_RELATIONSHIP_BUFFER", "within", raw, {"target_entity": target, "exclude": own},
+    calls.append(sql_call("SPATIAL_RELATIONSHIP_BUFFER", "within", zone_question(target),
+                          {"target_entity": target, "exclude": own},
                           ["zone_wkt", "zone_srid", "exclude"], ref.within(target)))
     if q.get("peer"):
         for peer in PEERS:
@@ -315,6 +337,34 @@ def write_markdown(path: Path, source: Path, questions: List[Dict[str, Any]],
     path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
+def write_sql_review(path: Path, source: Path, questions: List[Dict[str, Any]],
+                     per_q: List[List[Dict[str, Any]]]) -> None:
+    """Every SQL example, grouped by SQL step, for checking the correct SQL by
+    eye: one step's answers side by side make a wrong pattern stand out."""
+    by_step: Dict[Tuple[str, str], List[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
+    for q, calls in zip(questions, per_q):
+        for c in calls:
+            if c["meta"]["task"] == "sql":
+                by_step.setdefault((c["meta"]["category"], c["meta"]["step"]), []).append((q, c))
+    lines = [f"# SQL examples to review — {source.name}", "",
+             f"Every SQL example of `{source.name}`, grouped by SQL step. Generated — edit `{source.name}` "
+             "(questions) or `finetune/reference_sql.py` (the correct SQL), not this file.", "",
+             "**Input** is what the SQL step is given (it never sees the user's question itself); "
+             "**Correct SQL** is what the model is trained to write. `:name` placeholders are bound "
+             "by the agent when the statement runs.", "",
+             "| SQL step | examples | different correct SQL |", "|---|---|---|"]
+    for (cat, step), items in sorted(by_step.items()):
+        lines.append(f"| {cat} · {step} | {len(items)} | {len({c['answer'] for _, c in items})} |")
+    for (cat, step), items in sorted(by_step.items()):
+        lines += ["", f"## {cat} · {step}", ""]
+        for q, c in items:
+            lines += [f"### {q['id']}" + (" · validation" if c["meta"]["split"] == "val" else "")
+                      + f" — {q['question']}", "",
+                      "**Input**", "", "```json", c["user"], "```", "",
+                      "**Correct SQL**", "", "```sql", json.loads(c["answer"])["sql"], "```", ""]
+    path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("source", nargs="?", default=str(HERE / "questions_v1.yaml"))
@@ -351,13 +401,14 @@ def main() -> None:
     for c in calls:
         (PROMPTS / f"{c['prompt_name']}.txt").write_text(c["system"], encoding="utf-8", newline="\n")
     write_markdown(stem.with_suffix(".md"), source, questions, per_q)
+    write_sql_review(Path(f"{stem}_sql.md"), source, questions, per_q)
 
     n_val_q = sum(q["split"] == "val" for q in questions)
     n_val = sum(c["meta"]["split"] == "val" for c in calls)
     print(f"{len(questions)} questions -> {len(calls)} examples ({dropped} exact duplicates dropped) "
           f"(train {len(calls) - n_val} from {len(questions) - n_val_q} questions, "
           f"val {n_val} from {n_val_q} questions)")
-    print(f"  {stem.name}.jsonl / _train.jsonl / _val.jsonl / .md, prompts/ "
+    print(f"  {stem.name}.jsonl / _train.jsonl / _val.jsonl / .md / _sql.md, prompts/ "
           f"({len({c['prompt_name'] for c in calls})} files)")
 
 

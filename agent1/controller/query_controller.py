@@ -8,6 +8,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -19,6 +20,8 @@ from ..pipeline.query_params import DEFAULT_ENTITY_TYPE, RELATIONSHIP_TYPES, sys
 from ..retrieval.gap_detector import Exchange, answer_query, get_shapes
 from ..retrieval.spatial_compute import buffer_query, resolve_relationship, run_operation
 from ..evaluation import log_evaluation_metrics
+from ..result.totals import full_total_years, year_totals
+from ..settings import TOTAL_HINT_WINDOW_YEARS
 from kqml_messaging import response_status
 
 log = logging.getLogger("agent1.controller.query")
@@ -96,6 +99,9 @@ class QueryResponse(BaseModel):
     summary:     Summary
     provenance:  Provenance
     performance: Performance
+    # Only when the question asked for the places combined (result/totals.py)
+    totals:           Optional[List[Dict[str, Any]]] = None
+    full_total_years: Optional[List[int]] = None
 
 
 @router.post("/query")
@@ -309,10 +315,20 @@ def handle_query(body: UserQuery):
 
     log.info("       │ Groups  : complete=%d  partial=%d  missing=%d",
              len(complete_rows), len(partial_rows), len(missing_rows))
-    log.info("       │ Sources : A1=%d  A2=%d  both=%d  unavail=%d",
+    log.info("       │ Sources : local=%d  peer=%d  both=%d  unavail=%d",
              from_local, from_peer, from_both, unavail)
     log.info("       │ Data completeness: %.1f%%  (%d / %d points)",
              completeness, present_pts, total_pts)
+
+    # ── Totals across places, when asked for ─────────────────────────────────
+    totals = hint_years = None
+    if params.aggregate:
+        combined = _combined_totals(params, merged)
+        totals, hint_years = combined["totals"], combined["full_total_years"]
+        kqml_turns     += combined["kqml_turns"]
+        tokens_peer    += combined["tokens_peer"]
+        kqml_exchanges += combined["kqml_exchanges"]
+        local_result.queries.extend(combined["queries"])
 
     # ── Final status ──────────────────────────────────────────────────────────
     status = response_status(has_found=present_pts > 0,
@@ -365,6 +381,8 @@ def handle_query(body: UserQuery):
         "complete_records":    len(complete_rows),
         "partial_records":     len(partial_rows),
         "empty_records":       len(missing_rows),
+        "totals":              totals,
+        "full_total_years":    hint_years,
         "status":              status,
     })
 
@@ -412,7 +430,32 @@ def handle_query(body: UserQuery):
                 total=tokens_local + tokens_peer,
             ),
         ),
+        totals=totals,
+        full_total_years=hint_years,
     )
+
+
+def _combined_totals(params, merged: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The places' values combined per year (result/totals.py). When a year has
+    no full total, the same data path runs over a window of years
+    (settings.yaml total_hint_window_years, peer included) to name the years
+    that do. Returns the totals, those years, and what the extra lookup cost."""
+    totals = year_totals(merged, params.temporal, params.attributes, params.aggregate)
+    for t in totals:
+        log.info("       │ Total %s %s : %s%s", t["attribute"], t["year"], t["total"],
+                 f"  (missing: {', '.join(t['missing'])})" if t["missing"] else "")
+    out = {"totals": totals, "full_total_years": None, "kqml_turns": 0, "tokens_peer": 0,
+           "kqml_exchanges": [], "queries": []}
+    if any(t["total"] is None for t in totals):
+        first, last = min(params.temporal), max(params.temporal)
+        window = list(range(first - TOTAL_HINT_WINDOW_YEARS, last + TOTAL_HINT_WINDOW_YEARS + 1))
+        hint = answer_query(replace(params, query_type="DIRECT_LOOKUP", temporal=window))
+        out.update(full_total_years=full_total_years(hint.merged, params.attributes, params.aggregate),
+                   kqml_turns=hint.kqml_turns, tokens_peer=hint.tokens_peer,
+                   kqml_exchanges=hint.kqml_exchanges, queries=hint.local_result.queries)
+        log.info("       │ Full total available for: %s",
+                 out["full_total_years"] or f"no year within ±{TOTAL_HINT_WINDOW_YEARS}")
+    return out
 
 
 def _handle_unrelated(params, raw_query: str, request_id: str, timestamp: str, t0: float, tokens_local: int):
@@ -698,6 +741,22 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
     sources = {s.entity_name: s.source for s in shapes.values()}
     unresolved = sorted({name for (name, _t) in missing})
 
+    # "...and give me its population for 2017": the new shape's data — the
+    # places' values fetched (peer included) and combined per year.
+    data_part: Optional[Dict[str, Any]] = None
+    if params.attributes:
+        answered = answer_query(replace(params, query_type="DIRECT_LOOKUP"))
+        combined = _combined_totals(params, answered.merged)
+        data_part = {"data": answered.merged, "totals": combined["totals"]}
+        if combined["full_total_years"] is not None:
+            data_part["full_total_years"] = combined["full_total_years"]
+        exchange.kqml_turns  += answered.kqml_turns + combined["kqml_turns"]
+        exchange.tokens_peer += answered.tokens_peer + combined["tokens_peer"]
+        exchange.messages.extend(answered.kqml_exchanges + combined["kqml_exchanges"])
+        sql_queries.extend(answered.local_result.queries + combined["queries"])
+    totals_missing = bool(data_part and any(t["total"] is None for t in data_part["totals"]))
+    totals_found = bool(data_part and any(t["total"] is not None for t in data_part["totals"]))
+
     total_ms  = (time.perf_counter() - t0) * 1000
     phase1_ms = exchange.local_ms
     phase2_ms = exchange.peer_ms
@@ -706,9 +765,9 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
     if error:
         status = "error"
     elif result is None:
-        status = response_status(has_found=False, has_missing=True)
+        status = response_status(has_found=totals_found, has_missing=True)
     else:
-        status = response_status(has_found=True, has_missing=False)
+        status = response_status(has_found=True, has_missing=totals_missing)
 
     payload: Dict[str, Any] = {}
     if result is not None and operation == "BufferWithin":
@@ -740,6 +799,8 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
         payload["matches"] = _zone_matches(found["local"] + found["remote"])
         payload["summary"] = {"total": len(payload["matches"]), "from_local": len(found["local"]),
                               "from_peer": len(found["remote"])}
+    if data_part:
+        payload.update(data_part)
 
     log.info(SEPARATOR)
     log.info("DONE   │ [%s] SPATIAL_OPERATION op=%s status=%s  %.0f ms", request_id, operation, status, total_ms)
@@ -757,6 +818,8 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
             "entities_requested": names,
             "target_entity":      params.target_entity,
             "matches_found":      len(payload.get("matches", [])),
+            "attributes":         params.attributes,
+            "temporal":           params.temporal,
             "sources":            sources,
             "still_missing":      unresolved,
             "error":              error,
@@ -770,6 +833,8 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
         "present_data_points": found_count, "missing_data_points": len(unresolved),
         "complete_records": found_count if result is not None else 0,
         "partial_records": 0, "empty_records": len(unresolved),
+        "totals": data_part["totals"] if data_part else None,
+        "full_total_years": data_part.get("full_total_years") if data_part else None,
         "status": status,
     })
 
@@ -777,7 +842,8 @@ def _handle_spatial_operation(params, raw_query: str, request_id: str,
         "request_id": request_id,
         "status":     status,
         "query": {"raw": raw_query, "type": "SPATIAL_OPERATION", "operation": operation,
-                  "spatial": names, "target_entity": params.target_entity, "sources": sources},
+                  "spatial": names, "target_entity": params.target_entity, "sources": sources,
+                  **({"temporal": params.temporal, "attributes": params.attributes} if params.attributes else {})},
         **payload,
         "performance": {
             "phase1_ms": round(phase1_ms, 1), "phase2_ms": round(phase2_ms, 1),
@@ -816,11 +882,19 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
                                 "phase2_ms": 0, "phase3_ms": 0, "total_ms": 0,
                                 "tokens": {"local": tokens_local, "peer": 0, "total": tokens_local}}}
 
-    log.info("SPOP   │ Buffer query: %s within %s km", params.spatial[0], params.distance_km)
+    log.info("SPOP   │ Buffer query: %s within %s km%s", params.spatial[0], params.distance_km,
+             f", direction {params.direction}" if params.direction else "")
 
     sql_queries: List[str] = []
     exchange = Exchange()
-    outcome = buffer_query(params, sql_queries, exchange)
+    error: Optional[str] = None
+    try:
+        outcome = buffer_query(params, sql_queries, exchange)
+    except ValueError as exc:                   # unusable SQL twice — a real error, not a gap
+        log.error("SPOP   │ Zone search failed: %s", exc)
+        error = str(exc).split("\n[SQL:")[0]
+        outcome = {"reference": None, "local": [], "remote": [], "distance_km": params.distance_km,
+                   "direction": params.direction, "target_entity": params.target_entity}
     ref, local, remote = outcome["reference"], outcome["local"], outcome["remote"]
     distance_km, target = outcome["distance_km"], outcome["target_entity"]
     matches = _zone_matches(local + remote)
@@ -832,7 +906,8 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
 
     if ref is None:
         log.warning("SPOP   │ Reference place %r held by neither agent — no zone can be built", params.spatial[0])
-    status = response_status(has_found=bool(matches), has_missing=ref is None or not matches)
+    status = ("error" if error else
+              response_status(has_found=bool(matches), has_missing=ref is None or not matches))
 
     log.info(SEPARATOR)
     log.info("DONE   │ [%s] buffer status=%s  found=%d  %.0f ms", request_id, status, len(matches), total_ms)
@@ -848,6 +923,7 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
             "reference":        ref.entity_name if ref else params.spatial[0],
             "reference_source": ref.source if ref else "not_found",
             "distance_km":      distance_km,
+            "direction":        outcome["direction"],
             "target_entity":    target,
             "local_catalogue_matches": len(local),
             "note": "the matches cannot be named in advance — the zone is built once, "
@@ -873,9 +949,11 @@ def _handle_relationship_buffer(params, raw_query: str, request_id: str,
             "reference":        ref.entity_name if ref else params.spatial[0],
             "reference_source": ref.source if ref else "not_found",
             "distance_km":      distance_km,
+            "direction":        outcome["direction"],
             "target_entity":    target,
         },
         "matches": matches,
+        **({"message": error} if error else {}),
         "summary": {"total": len(matches), "from_local": len(local), "from_peer": len(remote)},
         "performance": {
             "phase1_ms": round(phase1_ms, 1), "phase2_ms": round(phase2_ms, 1),

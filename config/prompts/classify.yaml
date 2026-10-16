@@ -21,37 +21,34 @@ categories_intro: "Categories:"
 categories:
   - 'DIRECT_LOOKUP: asks for ${attribute_names} data for one or more named
     states (or "all" states). No spatial relationship, geometry, or shape combination is
-    involved — a plain (state, year, attribute) lookup.'
+    involved — a plain (state, year, attribute) lookup. ALSO covers the places'' values
+    added together ("the combined population of Bayern and Berlin"); if the states are
+    merged into one shape or area, it is SPATIAL_OPERATION instead.'
   - 'SPATIAL_ADJACENCY: asks which state(s) border / touch / share a border with one or more
     named states. A verdict about whether two boundaries meet, not a shape.'
-  - 'SPATIAL_DIRECTION: asks which states lie north / south / east / west of a named state.
-    A verdict about relative position, not a shape.'
+  - 'SPATIAL_DIRECTION: asks which STATES lie north / south / east / west of a named state.
+    A verdict about relative position, not a shape. CITIES in a direction ("Which cities
+    are north of Bayern?") are SPATIAL_RELATIONSHIP_BUFFER instead.'
   - 'SPATIAL_DISTANCE: asks which STATES are within some distance (km) of a named city or
     state, or whether one named state is within that distance of another. A verdict/list,
     not a shape.'
   - 'GEOMETRY_LOOKUP: asks for the geometry, shape, boundary, centroid, WKT, or coordinates
     of one or more named cities or states, as-is — NOT demographic data, and no combination
     of shapes is requested.'
-  - 'SPATIAL_OPERATION: asks for a NEW shape built out of two or more NAMED cities/states —
-    their union (one combined boundary), intersection (the area they share), difference
-    (one boundary with another''s area removed from it), or symmetric difference (the area
-    in one or the other but not both). ALSO covers a distance/buffer test where every
-    candidate is explicitly NAMED in the question ("Which of X and Y lie within N km of
-    Z?") — every entity involved, reference and candidates alike, is named in the query.
-    ALSO covers asking which cities lie INSIDE such a new shape ("Merge X and Y — which
-    cities are inside?", "Which cities lie in X once Y is removed?"): the shape is built
-    from named states first, then searched for cities.'
-  - 'SPATIAL_RELATIONSHIP_BUFFER: asks which members of an OPEN-ENDED, un-enumerable type —
-    in this system, cities — lie within some DISTANCE (km, "near", "close to") of a named
-    reference. The candidates are NOT named in the query; naming them is impossible because
-    they are the answer being asked for, not an input. The distinguishing test: could every
-    entity in the question be written down in advance? If yes (a fixed list of named states)
-    → SPATIAL_OPERATION or SPATIAL_DISTANCE. If no (the question only says "cities", not
-    which ones) and it asks about a distance from a place → SPATIAL_RELATIONSHIP_BUFFER.
-    ALSO covers which cities lie IN / INSIDE / WITHIN one named place with no distance
-    ("Which cities are in Hessen?", "Give me the cities within Bayern") — the same search
-    with a distance of 0. Cities inside a merged, overlapping or reduced area of two or
-    more named states are SPATIAL_OPERATION instead.'
+  - 'SPATIAL_OPERATION: builds a NEW shape from two or more NAMED cities/states — union
+    (merge / combine), intersection (the shared area), difference (one with another''s area
+    removed) or symmetric difference (in one or the other but not both). ALSO covers: a
+    buffer test where every candidate is NAMED ("Which of X and Y lie within N km of Z?");
+    which cities lie inside such a new shape ("Merge X and Y — which cities are inside?");
+    and the DATA (${attribute_names}) of a merged area ("Merge Hessen and Thüringen into one
+    shape and give me its population for 2017").'
+  - 'SPATIAL_RELATIONSHIP_BUFFER: asks which CITIES — an open-ended type whose members are
+    the answer, never named in the question — lie within some DISTANCE (km, "near", "close
+    to") of a named place, IN / INSIDE one named place ("Which cities are in Hessen?"), or
+    north / south / east / west of a named place ("Which cities are north of Bayern?").
+    The test: could every entity be written down in advance? If yes (named states) →
+    SPATIAL_OPERATION or SPATIAL_DISTANCE. Cities inside a merged or reduced area of two or
+    more named states are SPATIAL_OPERATION.'
   - 'UNRELATED: the question does not name a ${region_adjective} federal state or ${region_adjective} city, and does
     not ask for demographic data (${attribute_names}), geometry/shape, or a
     spatial relationship/operation over ${region_adjective} states/cities. This includes general-knowledge
@@ -72,6 +69,10 @@ examples:
     output: {query_type: "DIRECT_LOOKUP"}
   - query: "Give me married and live birth data for Berlin in 2020"
     output: {query_type: "DIRECT_LOOKUP"}
+  - query: "What was the combined population of Bayern and Berlin in 2018?"
+    output: {query_type: "DIRECT_LOOKUP"}
+  - query: "Merge Hessen and Thüringen and give me the total population of that area for 2017"
+    output: {query_type: "SPATIAL_OPERATION"}
   - query: "Which state borders both Hessen and Hamburg?"
     output: {query_type: "SPATIAL_ADJACENCY"}
   - query: "Do Bayern and Sachsen share a border?"
@@ -111,6 +112,8 @@ examples:
   - query: "What cities are within 50 km of München?"
     output: {query_type: "SPATIAL_RELATIONSHIP_BUFFER"}
   - query: "Which cities are in Hessen?"
+    output: {query_type: "SPATIAL_RELATIONSHIP_BUFFER"}
+  - query: "Which cities lie north of Bayern?"
     output: {query_type: "SPATIAL_RELATIONSHIP_BUFFER"}
   - query: "Combine Bayern and Sachsen into one area — which cities are inside it?"
     output: {query_type: "SPATIAL_OPERATION"}

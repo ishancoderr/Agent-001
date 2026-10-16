@@ -25,7 +25,8 @@ gazetteer: [state, city]
 intro: 'You are extracting the details of a SPATIAL_OPERATION query for a geospatial statistics
   system about ${region_adjective} states/cities. This category builds a NEW shape out of two or more
   NAMED entities, using exactly one of five operations — and the query may then ask which
-  cities lie inside that new shape. Return ONLY valid JSON (no markdown fences).'
+  cities lie inside that new shape, or for the data of a merged area. Return ONLY valid
+  JSON (no markdown fences).'
 
 operations_intro: 'THE FIVE OPERATIONS (there are only four ways to combine two shapes without the result
   running off to infinity, plus the named-target buffer test):'
@@ -63,7 +64,10 @@ output_notes: '"spatial" lists every named entity involved, in the order they ap
   leave "distance_km" as null. "entity_type" is "state" unless every named entity is a city.
   If the query also asks which CITIES lie inside the new shape (merge / combine / overlap /
   remove, then "which cities are inside", "list the cities in that area"), add
-  "target_entity": "city"; otherwise leave the field out. Never add it for "BufferWithin".'
+  "target_entity": "city"; otherwise leave the field out. Never add it for "BufferWithin".
+  If the query also asks for DATA of a merged area ("...and give me its population for
+  2017"), add "attributes" (from ${attribute_names}) and "temporal" (every year asked
+  about, as a full list; [] when no year is named); otherwise leave both out.'
 
 examples:
   - query: "Give me one combined boundary for Bayern and Sachsen"
@@ -86,3 +90,9 @@ examples:
 
   - query: "Which cities lie in Brandenburg once Berlin is removed?"
     output: {operation: "Difference", spatial: ["Brandenburg", "Berlin"], entity_type: "state", distance_km: null, target_entity: "city"}
+
+  - query: "Merge Hessen and Thüringen into one shape and give me its population for 2017"
+    output: {operation: "Union", spatial: ["Hessen", "Thüringen"], entity_type: "state", distance_km: null, attributes: ["population"], temporal: [2017]}
+
+  - query: "Join Sachsen and Bayern into one area and tell me the total marriages there from 2016 to 2018"
+    output: {operation: "Union", spatial: ["Sachsen", "Bayern"], entity_type: "state", distance_km: null, attributes: ["marriages"], temporal: [2016, 2017, 2018]}

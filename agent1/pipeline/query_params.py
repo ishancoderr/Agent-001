@@ -44,6 +44,12 @@ _ATTRIBUTE_TABLES = yaml.safe_load(
     (_SCHEMA_DIR / "attributes.yaml").read_text(encoding="utf-8")
 )["attribute_tables"]
 VALID_ATTRS = {column for table in _ATTRIBUTE_TABLES for column in table["columns"]}
+# How each attribute combines across places (attributes.yaml `aggregate:`);
+# an attribute without one is never totalled.
+ATTRIBUTE_AGGREGATE: Dict[str, str] = {
+    column: spec["aggregate"]
+    for table in _ATTRIBUTE_TABLES for column, spec in table["columns"].items() if spec.get("aggregate")
+}
 
 # Every enabled entity type declared in entities.yaml — same reasoning: this
 # used to be a hardcoded {"city", "state"} that entities.yaml's own "adding
@@ -190,8 +196,14 @@ class QueryParams:
     # SPATIAL_OPERATION / SPATIAL_RELATIONSHIP_BUFFER
     distance_km: Optional[float] = None
     target_entity: Optional[str] = None
+    # SPATIAL_RELATIONSHIP_BUFFER: search a compass direction of the place
+    # instead of a distance around it ("cities north of Bayern")
+    direction: Optional[str] = None
     # SPATIAL_OPERATION only
     operation: Optional[str] = None
+    # Combine the places' values ("sum") — DIRECT_LOOKUP "combined population of
+    # X and Y", and SPATIAL_OPERATION asking for the merged area's data (result/totals.py)
+    aggregate: Optional[str] = None
     entity_type: Optional[str] = None
     # Step-by-step trace, for evaluation logging — see metrics_logger.py
     classify_tokens: int = 0

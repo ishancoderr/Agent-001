@@ -1,4 +1,4 @@
-# Fine-tuning questions, version 2 — 314 questions (v1's 120 + 194 new).
+# Fine-tuning questions, version 2 — 332 questions (v1's 120 + 212 new).
 #
 # Written by hand: drafted with Claude Code in October 2026 following the plan
 # in HOW_TO_WRITE_QUESTIONS.md, to be reviewed by the thesis author. That guide
@@ -24,11 +24,13 @@
 #     Hamburg the city, greetings
 #
 #   group          classify label(s)                                  v1   new   v2
-#   data           DIRECT_LOOKUP (6 end as NEEDS_YEAR)                22  +38    60
+#   data           DIRECT_LOOKUP (7 NEEDS_YEAR, 6 combined totals)    22  +44    66
 #   geometry       GEOMETRY_LOOKUP                                    22  +29    51
-#   operation      SPATIAL_OPERATION (14 BufferWithin, 15 + cities)   22  +44    66
+#   operation      SPATIAL_OPERATION (14 BufferWithin, 15 + cities,   22  +48    70
+#                  4 merge + the merged area's data)
 #   relationship   SPATIAL_ADJACENCY / _DIRECTION / _DISTANCE         22  +36    58
-#   delegation     SPATIAL_RELATIONSHIP_BUFFER (8 cities in a state)  22  +32    54
+#   delegation     SPATIAL_RELATIONSHIP_BUFFER (8 in a state,         22  +40    62
+#                  8 in a direction)
 #   unrelated      UNRELATED                                          10  +15    25
 #
 # The questions of test_set_v1.yaml and the twenty scenario questions of
@@ -223,6 +225,19 @@
    extract: {spatial: [Mecklenburg-Vorpommern, Sachsen-Anhalt], temporal: [1990, 2019], attributes: [population], entity_type: state}}
 - {id: d60, category: DIRECT_LOOKUP, question: "How many people lived in Germany's federal states in 2011?",
    extract: {spatial: all, temporal: [2011], attributes: [population], entity_type: state}}
+# the places' values added together (aggregate: sum), no shape — a merge with data is SPATIAL_OPERATION (o67–o70)
+- {id: d62, category: DIRECT_LOOKUP, question: "What was the combined population of Sachsen and Sachsen-Anhalt in 2017?",
+   extract: {spatial: [Sachsen, Sachsen-Anhalt], temporal: [2017], attributes: [population], entity_type: state, aggregate: sum}}
+- {id: d63, category: DIRECT_LOOKUP, question: "How many marriages were there in Hamburg and Bremen together in 2016?",
+   extract: {spatial: [Hamburg, Bremen], temporal: [2016], attributes: [marriages], entity_type: state, aggregate: sum}}
+- {id: d64, category: DIRECT_LOOKUP, question: "Total live births of Niedersachsen, Bremen and Hamburg from 2015 to 2017",
+   extract: {spatial: [Niedersachsen, Bremen, Hamburg], temporal: [2015, 2016, 2017], attributes: [live_births], entity_type: state, aggregate: sum}}
+- {id: d66, category: DIRECT_LOOKUP, question: "cumulative population of all german states in 2016",
+   extract: {spatial: all, temporal: [2016], attributes: [population], entity_type: state, aggregate: sum}}
+- {id: d67, category: DIRECT_LOOKUP, question: "Population of Saarland plus Rheinland-Pfalz in 2018",
+   extract: {spatial: [Saarland, Rheinland-Pfalz], temporal: [2018], attributes: [population], entity_type: state, aggregate: sum}}
+- {id: d68, category: DIRECT_LOOKUP, expect: NEEDS_YEAR, question: "What is the combined population of Hessen and Bayern?",
+   extract: {spatial: [Hessen, Bayern], temporal: [], attributes: [population], entity_type: state, aggregate: sum}}
 
 # ══ geometry · GEOMETRY_LOOKUP ═══════════════════════════════════════════════
 
@@ -473,6 +488,15 @@
    extract: {operation: SymDifference, spatial: [Rheinland-Pfalz, Hessen], entity_type: state, distance_km: null, target_entity: city}}
 - {id: o66, category: SPATIAL_OPERATION, question: "Combine the cities Dresden and Leipzig into one shape",
    extract: {operation: Union, spatial: [Dresden, Leipzig], entity_type: city, distance_km: null}}
+# merge, then the merged area's data (the states' values added up)
+- {id: o67, category: SPATIAL_OPERATION, peer: true, question: "Merge Bayern and Baden-Württemberg and give me the total population of that area for 2018",
+   extract: {operation: Union, spatial: [Bayern, Baden-Württemberg], entity_type: state, distance_km: null, attributes: [population], temporal: [2018]}}
+- {id: o68, category: SPATIAL_OPERATION, question: "If you join Berlin and Brandenburg into one region, what is its population in 2019?",
+   extract: {operation: Union, spatial: [Berlin, Brandenburg], entity_type: state, distance_km: null, attributes: [population], temporal: [2019]}}
+- {id: o69, category: SPATIAL_OPERATION, question: "Merge Sachsen and Thüringen into one shape and give me their combined population for 2018",
+   extract: {operation: Union, spatial: [Sachsen, Thüringen], entity_type: state, distance_km: null, attributes: [population], temporal: [2018]}}
+- {id: o70, category: SPATIAL_OPERATION, peer: true, question: "Combine Hamburg and Schleswig-Holstein into one area: show the shape and the total live births in 2019",
+   extract: {operation: Union, spatial: [Hamburg, Schleswig-Holstein], entity_type: state, distance_km: null, attributes: [live_births], temporal: [2019]}}
 
 # ══ relationship · SPATIAL_ADJACENCY / SPATIAL_DIRECTION / SPATIAL_DISTANCE ══
 # "spatial" is always "all"; temporal is [] when no year is asked (the prompt's
@@ -715,6 +739,23 @@
    extract: {spatial: [Hamburg], operations: [Buffer, Within], distance_km: 0, target_entity: city}}
 - {id: b54, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities lie within 25 km of Schleswig-Holstein?",
    extract: {spatial: [Schleswig-Holstein], operations: [Buffer, Within], distance_km: 25, target_entity: city}}
+# cities in a DIRECTION of a place (the wedge in that compass direction; a distance limits how far)
+- {id: b55, category: SPATIAL_RELATIONSHIP_BUFFER, peer: true, question: "What are the cities north of Hessen?",
+   extract: {spatial: [Hessen], operations: [Buffer, Within], distance_km: null, target_entity: city, direction: north_of}}
+- {id: b56, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities lie south of Thüringen?",
+   extract: {spatial: [Thüringen], operations: [Buffer, Within], distance_km: null, target_entity: city, direction: south_of}}
+- {id: b57, category: SPATIAL_RELATIONSHIP_BUFFER, question: "List the cities east of Niedersachsen",
+   extract: {spatial: [Niedersachsen], operations: [Buffer, Within], distance_km: null, target_entity: city, direction: east_of}}
+- {id: b58, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities are west of Sachsen?",
+   extract: {spatial: [Sachsen], operations: [Buffer, Within], distance_km: null, target_entity: city, direction: west_of}}
+- {id: b59, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities are east of Dortmund?",
+   extract: {spatial: [Dortmund], operations: [Buffer, Within], distance_km: null, target_entity: city, direction: east_of}}
+- {id: b60, category: SPATIAL_RELATIONSHIP_BUFFER, question: "Which cities lie within 50 km north of Frankfurt am Main?",
+   extract: {spatial: [Frankfurt am Main], operations: [Buffer, Within], distance_km: 50, target_entity: city, direction: north_of}}
+- {id: b61, category: SPATIAL_RELATIONSHIP_BUFFER, question: "cities to the south of Hamburg within 30 km",
+   extract: {spatial: [Hamburg], operations: [Buffer, Within], distance_km: 30, target_entity: city, direction: south_of}}
+- {id: b62, category: SPATIAL_RELATIONSHIP_BUFFER, names_translated: true, question: "Which towns lie west of Bavaria?",
+   extract: {spatial: [Bayern], operations: [Buffer, Within], distance_km: null, target_entity: city, direction: west_of}}
 
 # ══ unrelated · UNRELATED (classify only — the pipeline stops there) ═════════
 

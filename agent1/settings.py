@@ -27,9 +27,14 @@ REGION_ADJECTIVE: str = _SETTINGS["region_adjective"]
 DEFAULT_DISTANCE_KM: float = float(_SETTINGS["default_distance_km"])
 RELATIONSHIP_KINDS: Dict[str, List[str]] = _SETTINGS["relationship_kinds"]
 DIRECTION_SECTORS: Dict[str, List[float]] = _SETTINGS["direction_sectors"]
+DIRECTION_SEARCH_RADIUS_KM: float = float(_SETTINGS["direction_search_radius_km"])
 PLACE_REFERENCE_KINDS: List[str] = _SETTINGS["place_reference_kinds"]
 _WORDING: Dict[str, str] = _SETTINGS["relationship_wording"]
 OPERATIONS: Dict[str, Any] = _SETTINGS["operations"]          # name -> PostGIS function (None: not a combine)
+TOTAL_HINT_WINDOW_YEARS: int = int(_SETTINGS["total_hint_window_years"])
+DATA_OPERATIONS: List[str] = _SETTINGS["data_operations"]
+if not set(DATA_OPERATIONS) <= set(OPERATIONS):
+    raise KeyError(f"data_operations {DATA_OPERATIONS} must be listed under operations in config/settings.yaml")
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 RUNTIME: Dict[str, Any] = _SETTINGS["runtime"]
@@ -56,13 +61,12 @@ def relationship_wording(kind: str, distance_km: float | None) -> str:
     return template.format(km=km, direction=kind.removesuffix("_of"))
 
 
-def sector_condition(kind: str, column: str) -> str:
-    """SQL condition for a direction sector on a bearing column, e.g.
-    "(az >= 315 OR az <= 45)" for a sector that wraps through north."""
+def sector_bounds(kind: str) -> tuple[int, int]:
+    """A direction's sector as (start, end) bearings in degrees, end > start:
+    a sector that wraps through north ends past 360 (north_of: 315, 405).
+    Bound into SQL as :az_start / :az_end."""
     start, end = DIRECTION_SECTORS[kind]
-    if start > end:
-        return f"({column} >= {start:g} OR {column} <= {end:g})"
-    return f"{column} >= {start:g} AND {column} <= {end:g}"
+    return int(start), int(end + 360 if start > end else end)
 
 
 def _default_attribute() -> str:
@@ -87,6 +91,7 @@ _TOKENS: Dict[str, str] = {
     "operation_names":     _quoted(OPERATIONS),
     "attribute_names":     " / ".join(c for t in _ATTRIBUTE_TABLES for c in t["columns"]),
     "default_attribute":   _default_attribute(),
+    "direction_names":     _quoted(DIRECTION_SECTORS),
     "direction_sectors":   ", ".join(
         f'"{k}" {s:g}-{e:g}' if s < e else f'"{k}" {s:g}-360 or 0-{e:g}'
         for k, (s, e) in DIRECTION_SECTORS.items()),

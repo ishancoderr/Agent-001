@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple
 
 import yaml
 
-from agent1.settings import OPERATIONS, sector_condition
+from agent1.settings import OPERATIONS
 
 _SCHEMA = Path(__file__).resolve().parent.parent / "config" / "schema"
 ENTITIES: Dict[str, dict] = yaml.safe_load((_SCHEMA / "entities.yaml").read_text(encoding="utf-8"))["entities"]
@@ -101,13 +101,24 @@ def relationship(kind: str) -> str:
                 f"ORDER BY ST_Distance(cand.shape::geography, ref.shape::geography)")
     return (f"{_CANDIDATES}, bearing(entity_name, az) AS (SELECT cand.entity_name, degrees(ST_Azimuth("
             f"ST_Centroid(ref.shape), ST_Centroid(cand.shape))) FROM cand, ref WHERE cand.entity_name <> :ref) "
-            f"SELECT bearing.entity_name AS entity_name FROM bearing WHERE {sector_condition(kind, 'bearing.az')} ORDER BY bearing.az")
+            f"SELECT bearing.entity_name AS entity_name FROM bearing WHERE bearing.az BETWEEN :az_start AND :az_end "
+            f"OR bearing.az + 360 BETWEEN :az_start AND :az_end ORDER BY bearing.az")
 
 
 # ── SPATIAL_RELATIONSHIP_BUFFER ─────────────────────────────────────────────
 
 ZONE = ("SELECT ST_AsText(ST_Buffer(ST_GeomFromText(:ref_wkt, :ref_srid)::geography, :dist_m)::geometry) AS wkt, "
         ":ref_srid AS srid")
+
+
+# The area in one compass direction of a place: a wedge from its centroid
+# between two bearings, the place itself removed.
+SECTOR = ("WITH ref(shape) AS (SELECT ST_GeomFromText(:ref_wkt, :ref_srid)), bearings(a) AS (SELECT generate_se"
+          "ries(CAST(:az_start AS int), CAST(:az_end AS int), 5)), arc(a, pt) AS (SELECT bearings.a, ST_Project"
+          "(ST_Centroid(ref.shape)::geography, :radius_m, radians(bearings.a))::geometry FROM ref, bearings) SE"
+          "LECT ST_AsText(ST_Difference(ST_MakePolygon(ST_AddPoint(ST_AddPoint(ST_MakeLine(array_agg(arc.pt ORD"
+          "ER BY arc.a)), ST_Centroid(ref.shape), 0), ST_Centroid(ref.shape))), ref.shape)) AS wkt, :ref_srid A"
+          "S srid FROM arc, ref GROUP BY ref.shape")
 
 
 def within(entity_type: str) -> str:
@@ -117,5 +128,5 @@ def within(entity_type: str) -> str:
     geom = f"{e}.{ent['geometry_column']}"
     test = "ST_Within" if ent["geometry_kind"] == "point" else "ST_Intersects"
     return (f"SELECT {e}.{ent['key_column']} AS entity_name, ST_AsText({geom}) AS wkt, ST_SRID({geom}) AS srid "
-            f"FROM {ent['table']} {e} WHERE {geom} IS NOT NULL AND {test}({geom}, "
+            f"FROM {ent['table']} {e} WHERE {test}({geom}, "
             f"ST_GeomFromText(:zone_wkt, :zone_srid)) AND NOT ({e}.{ent['key_column']} = ANY(:exclude))")

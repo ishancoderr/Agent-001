@@ -23,11 +23,19 @@ steps:
     task: 'Fetch the requested attribute values for the requested places and
       years from this agent''s own tables. Return one row per place per year
       that exists here. Do not compute any spatial relationship: the places to
-      use are exactly :names, already resolved; the question is context only.'
+      use are exactly :names, already resolved; the question is context only.
+      Never combine values: even when the question asks for a combined, total
+      or cumulative value, return the stored rows one per place and year — the
+      agent adds them up afterwards, so it can tell which place is missing.'
 
     placeholders:
       names: 'text[] — the place names to fetch (compare with = ANY(:names))'
       years: 'int[] — the years to fetch (compare with = ANY(:years))'
+
+    must_use: [names, years]
+    # One row per stored (place, year): no SUM/AVG/COUNT/MIN/MAX, GROUP BY or
+    # HAVING (checked by SqlWriter) — totals are made in agent1/result/totals.py.
+    no_aggregation: true
 
     # The gap detector reads the result by these names. Wrong or missing
     # aliases mean the values cannot be read, so they are checked after the
@@ -38,7 +46,7 @@ steps:
 
     examples:
       - input:
-          question: "How many people lived in Bayern and Sachsen in 2021?"
+          question: "Fetch population of Bayern, Sachsen in [2021]"
           entity_type: state
           spatial: ["Bayern", "Sachsen"]
           temporal: [2021]
@@ -47,7 +55,7 @@ steps:
           sql: "SELECT s.state_name AS entity_name, sd.stat_year AS year, sd.population AS population FROM state_demographics sd JOIN states s ON s.state_id = sd.state_id WHERE s.state_name = ANY(:names) AND sd.stat_year = ANY(:years) ORDER BY s.state_name, sd.stat_year"
 
       - input:
-          question: "Give me the marriage and live birth figures for Saarland from 2018 to 2020."
+          question: "Fetch marriages, live_births of Saarland in [2018, 2019, 2020]"
           entity_type: state
           spatial: ["Saarland"]
           temporal: [2018, 2019, 2020]
@@ -56,7 +64,7 @@ steps:
           sql: "SELECT s.state_name AS entity_name, sd.stat_year AS year, sd.marriages AS marriages, sd.live_births AS live_births FROM state_demographics sd JOIN states s ON s.state_id = sd.state_id WHERE s.state_name = ANY(:names) AND sd.stat_year = ANY(:years) ORDER BY s.state_name, sd.stat_year"
 
       - input:
-          question: "What was the population in 2021 of the states that border Thueringen?"
+          question: "Fetch population of Bayern, Hessen, Niedersachsen, Sachsen, Sachsen-Anhalt in [2021]"
           entity_type: state
           spatial: ["Bayern", "Hessen", "Niedersachsen", "Sachsen", "Sachsen-Anhalt"]
           temporal: [2021]
@@ -71,6 +79,8 @@ steps:
 
     placeholders:
       names: 'text[] — the place names to check (compare with = ANY(:names))'
+
+    must_use: [names]
 
     columns: 'entity_name only, one row per place that has any row. Use
       SELECT DISTINCT.'

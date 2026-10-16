@@ -67,7 +67,9 @@ output_notes: '"spatial" is the named entity/entities, or "all" if none/every on
   answer. "entity_type" is whichever entity type''s attribute list (given above) actually
   contains what was asked for — go by the attribute and the named entity itself, not by
   assumption; default to "state" only when the query gives no basis to tell (e.g. a bare
-  "all" with no other clue).'
+  "all" with no other clue). Add "aggregate": "sum" only when the query asks for the
+  places'' values added together — combined, total, cumulative, together, altogether;
+  leave "aggregate" out otherwise. The places are still listed one by one in "spatial".'
 
 examples:
   - query: "Give me population for all German states in 2021"
@@ -78,3 +80,9 @@ examples:
 
   - query: "Give me married and live birth data for Berlin in 2020"
     output: {spatial: ["Berlin"], temporal: [2020], attributes: ["marriages", "live_births"], entity_type: "state"}
+
+  - query: "What was the combined population of Bayern and Berlin in 2018?"
+    output: {spatial: ["Bayern", "Berlin"], temporal: [2018], attributes: ["population"], entity_type: "state", aggregate: "sum"}
+
+  - query: "Total marriages of Hamburg and Bremen together in 2016"
+    output: {spatial: ["Hamburg", "Bremen"], temporal: [2016], attributes: ["marriages"], entity_type: "state", aggregate: "sum"}
