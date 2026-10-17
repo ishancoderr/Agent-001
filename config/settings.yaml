@@ -77,12 +77,39 @@ total_hint_window_years: 5
 # difference does not, so their data is never guessed from state totals.
 data_operations: [Union]
 
+# ── Language models ─────────────────────────────────────────────────────────
+
+# The models a question can be answered with — all three LLM calls (classify,
+# extract, SQL) use the one chosen. The front end lists them (GET /llms); a
+# /query request picks one with "llm"; without it, `default` is used (or
+# LLM_DEFAULT from .env). A model is offered only when its provider's
+# credentials are in .env:
+#   openai      OPENAI_API_KEY
+#   anthropic   ANTHROPIC_API_KEY
+#   openweight  QWEN_HOST + QWEN_API_KEY — the openweight-llm service
+#               (Qwen3-8B with and without the QLoRA adapter; `path` is its endpoint)
+# Anthropic models think before they answer; `effort` sets how much, and
+# `fallbacks: default` lets the API answer with another Claude model if the
+# chosen one declines (the response then names the model that answered).
+# OpenAI models are asked for JSON with response_format; `json_mode: false`
+# leaves it out for a model that doesn't support it (the original GPT-4) —
+# the prompts ask for JSON only either way.
+llm:
+  default: gpt-4o-mini
+  models:
+    gpt-4o-mini:   {label: "GPT-4o mini",                   provider: openai,     model: gpt-4o-mini}
+    gpt-4:         {label: "GPT-4",                         provider: openai,     model: gpt-4, json_mode: false}
+    gpt-4o:        {label: "GPT-4o",                        provider: openai,     model: gpt-4o}
+    claude-haiku:  {label: "Claude Haiku 5.5",              provider: anthropic,  model: claude-haiku-5-5, effort: low}
+    claude-opus:   {label: "Claude Opus 5.5",               provider: anthropic,  model: claude-opus-5-5,  effort: low, fallbacks: default}
+    qwen3-8b:      {label: "Qwen3-8B (base)",               provider: openweight, path: /openWeightllm/qwen8B}
+    qwen3-8b-lora: {label: "Qwen3-8B + QLoRA (fine-tuned)", provider: openweight, path: /openWeightllm/qwen8B/lora-finetune}
+  # A self-hosted model answers one request at a time; allow for queueing.
+  openweight_timeout_s: 300
+
 # ── Runtime ──────────────────────────────────────────────────────────────────
 
 runtime:
-  # Model for the three LLM calls when CLASSIFY_MODEL / EXTRACT_MODEL /
-  # SQL_MODEL are not set in .env.
-  default_model: gpt-4o-mini
   # How many times a KQML ask to the peer is tried before its gap stays open.
   peer_retries: 3
   # HTTP timeouts for one KQML exchange, in seconds.

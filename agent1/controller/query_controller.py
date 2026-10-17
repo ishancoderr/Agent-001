@@ -21,7 +21,8 @@ from ..retrieval.gap_detector import Exchange, answer_query, get_shapes
 from ..retrieval.spatial_compute import buffer_query, resolve_relationship, run_operation
 from ..evaluation import log_evaluation_metrics
 from ..result.totals import full_total_years, year_totals
-from ..settings import TOTAL_HINT_WINDOW_YEARS
+from ..settings import LLM_MODELS, TOTAL_HINT_WINDOW_YEARS
+from .. import llm
 from kqml_messaging import response_status
 
 log = logging.getLogger("agent1.controller.query")
@@ -32,11 +33,30 @@ SEPARATOR = "_" * 60
 
 class UserQuery(BaseModel):
     query: str = Field(..., min_length=5, max_length=500)
-    # Per-request override of the OpenAI model used for classification and
-    # extraction. Omit to use CLASSIFY_MODEL/EXTRACT_MODEL from the server's
-    # .env (see agent1/.env.example) — this is for a caller who wants a
-    # specific model for one query, not for setting the deployment default.
+    # The language model for this question — an id from GET /llms
+    # (config/settings.yaml llm.models), used for classify, extract and SQL.
+    # Omit it for the default (LLM_DEFAULT in .env, else llm.default).
+    llm: Optional[str] = Field(None, min_length=1, max_length=100)
+    # Older field: an OpenAI model name ("gpt-4o-mini") or a model id. Prefer `llm`.
     model: Optional[str] = Field(None, min_length=1, max_length=100)
+
+
+def _choice(body: UserQuery) -> Optional[str]:
+    """The model id a request asks for (None: the default)."""
+    wanted = body.llm or body.model
+    if wanted is None or wanted in LLM_MODELS:
+        return wanted
+    for choice, spec in LLM_MODELS.items():            # an OpenAI model name, the older form
+        if spec["provider"] == "openai" and spec.get("model") == wanted:
+            return choice
+    raise HTTPException(status_code=400, detail=f"unknown model {wanted!r} — see GET /llms")
+
+
+@router.get("/llms")
+def list_llms():
+    """The language models a question can be answered with, and which are
+    configured on this agent (their credentials are in .env)."""
+    return {"default": llm.default_model(), "models": llm.options()}
 
 
 class QueryInfo(BaseModel):
@@ -106,6 +126,22 @@ class QueryResponse(BaseModel):
 
 @router.post("/query")
 def handle_query(body: UserQuery):
+    """Answer one question with the model it chose; the response says which."""
+    try:
+        with llm.using(_choice(body)) as chosen:
+            if not llm.configured(chosen):
+                raise HTTPException(status_code=400, detail=(
+                    f"{LLM_MODELS[chosen]['label']} is not configured on {AGENT_NAME} — "
+                    f"its credentials are missing from the agent's .env"))
+            result = _answer(body)
+    except llm.UnknownModel as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    data = result.model_dump() if isinstance(result, BaseModel) else dict(result)
+    data["llm"] = {"id": chosen, "label": LLM_MODELS[chosen]["label"]}
+    return data
+
+
+def _answer(body: UserQuery):
     t0 = time.perf_counter()
     request_id = uuid.uuid4().hex[:8]
     timestamp  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -118,9 +154,9 @@ def handle_query(body: UserQuery):
     log.info("       │ Query      : %r", body.query)
 
     # ── Step 1: understand the question (clean, classify, extract params) ────
-    log.info("STEP 1 │ Parsing natural-language query with GPT-4o mini ...")
+    log.info("STEP 1 │ Parsing natural-language query with %s ...", llm.entry()["label"])
     try:
-        params = run_pipeline(body.query, model=body.model)
+        params = run_pipeline(body.query)
     except Exception as exc:
         log.error("STEP 1 │ FAILED – %s", exc)
         raise HTTPException(status_code=400, detail=f"Parse error: {exc}") from exc

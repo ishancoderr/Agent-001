@@ -16,8 +16,8 @@ step by step from this file alone:
 The model name shown for each stage is whatever QueryClassifier.model /
 QueryExtractor.model actually was for that request (see
 metrics["classify_model"]/["extract_model"], set from QueryParams by
-query_controller.py) — CLASSIFY_MODEL/EXTRACT_MODEL's env-configured default
-unless that request passed its own `model` override. Never hardcode a model
+query_controller.py) — the model id the request chose (agent1/llm), or the
+default (LLM_DEFAULT / config/settings.yaml llm.default). Never hardcode a model
 name here: it drifts the moment the env default or a request's override
 changes, silently mislabeling every report after that.
 """

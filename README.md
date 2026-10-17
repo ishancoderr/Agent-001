@@ -283,11 +283,31 @@ PEER_AGENTS=Agent-2=http://localhost:8001
 
 OPENAI_API_KEY=sk-proj-...
 
-# optional per-stage model overrides — default to gpt-4o-mini if unset
-# CLASSIFY_MODEL=gpt-4o-mini
-# EXTRACT_MODEL=gpt-4o-mini
-# SQL_MODEL=gpt-4o-mini
+# the language model when a request doesn't choose one (an id from config/settings.yaml llm.models)
+LLM_DEFAULT=gpt-4o-mini
+# Claude models
+# ANTHROPIC_API_KEY=sk-ant-...      (CLAUDE_API_KEY works too)
+# Qwen3-8B with / without the QLoRA adapter, on the openweight-llm service
+# QWEN_HOST=http://<ec2-public-ip>
+# QWEN_API_KEY=<API_KEY from the openweight-llm server's .env>
 ```
+
+**Choosing the language model.** All three LLM calls — classify, extract and SQL — run on one
+model, chosen per question. The models are listed in `config/settings.yaml` (`llm.models`):
+
+| id | model | provider | needs in `.env` |
+|---|---|---|---|
+| `gpt-4o-mini` | GPT-4o mini | OpenAI | `OPENAI_API_KEY` |
+| `gpt-4` | GPT-4 (the original; no JSON mode, 8k context) | OpenAI | `OPENAI_API_KEY` |
+| `gpt-4o` | GPT-4o | OpenAI | `OPENAI_API_KEY` |
+| `claude-haiku` | Claude Haiku 5.5 | Anthropic | `ANTHROPIC_API_KEY` |
+| `claude-opus` | Claude Opus 5.5 | Anthropic | `ANTHROPIC_API_KEY` |
+| `qwen3-8b` | Qwen3-8B, not fine-tuned | openweight-llm | `QWEN_HOST`, `QWEN_API_KEY` |
+| `qwen3-8b-lora` | Qwen3-8B + QLoRA adapter | openweight-llm | `QWEN_HOST`, `QWEN_API_KEY` |
+
+A model is offered only when its credentials are set. `GET /llms` lists them (the GeoQuery
+workbench shows them in a dropdown), a `/query` request picks one with `"llm"`, and every
+response says which model answered. A KQML request from the peer is answered with the default.
 
 To add a third or fourth agent later, add it to `PEER_AGENTS`
 (`Agent-2=http://localhost:8001,Agent-3=http://localhost:8002`) — no code change needed.
@@ -308,8 +328,10 @@ uvicorn agent1.main:app --port 8000 --reload
 ```bash
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "Give me population data for Hessen from 2022 to 2025"}'
+  -d '{"query": "Give me population data for Hessen from 2022 to 2025", "llm": "qwen3-8b-lora"}'
 ```
+
+`llm` is optional (default: `LLM_DEFAULT`). The response carries `"llm": {"id": …, "label": …}`.
 
 | Status | Meaning |
 |---|---|
@@ -322,6 +344,13 @@ curl -X POST http://localhost:8000/query \
 
 Receives a KQML `ask` from the peer agent, answers it against this agent's own database,
 returns a KQML `tell`.
+
+### `GET /llms`
+
+```json
+{"default": "gpt-4o-mini",
+ "models": [{"id": "gpt-4o-mini", "label": "GPT-4o mini", "provider": "openai", "available": true}, …]}
+```
 
 ### `GET /health`
 

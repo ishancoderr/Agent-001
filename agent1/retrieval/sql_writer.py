@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,11 +41,12 @@ from sqlglot import exp
 
 from ..database import SessionLocal
 
-from ..settings import DEFAULT_MODEL, render as fill_placeholders
+from .. import llm
+from ..settings import render as fill_placeholders
 
 log = logging.getLogger("agent1.retrieval.sql_writer")
 
-SQL_MODEL = os.getenv("SQL_MODEL", DEFAULT_MODEL)       # default: config/settings.yaml
+# The model is the one the request chose (agent1/llm, config/settings.yaml).
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SCHEMA_DIR = _REPO_ROOT / "config" / "schema"
@@ -344,9 +344,8 @@ class BuiltQuery:
 class SqlWriter:
     """Writes one validated SELECT per call, for any category and step."""
 
-    def __init__(self, client: openai.OpenAI | None = None, model: str = SQL_MODEL):
-        self._client = client or openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        self.model = model
+    def __init__(self, client: openai.OpenAI | None = None):
+        self._client = client                      # reused when the chosen model is an OpenAI one
         self.tokens_used = 0
         self._prompts: Dict[str, str] = {}
         self._must_use: Dict[str, List[str]] = {}
@@ -419,20 +418,12 @@ class SqlWriter:
         if previous_error:
             payload["previous_attempt_failed_with"] = previous_error
         user = json.dumps(payload, ensure_ascii=False, default=str)
-        response = self._client.chat.completions.create(
-            model=self.model,
-            max_tokens=500,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": self._system_prompt(category, step)},
-                {"role": "user", "content": user},
-            ],
+        raw, tokens = llm.complete(
+            [{"role": "system", "content": self._system_prompt(category, step)}, {"role": "user", "content": user}],
+            max_tokens=500, client=self._client,
         )
-        raw = response.choices[0].message.content.strip()
-        tokens = response.usage.total_tokens if response.usage else 0
         self.tokens_used += tokens
-        log.info("       | SqlWriter (%s, %s/%s, tokens=%d): %s", self.model, category, step, tokens, raw)
+        log.info("       | SqlWriter (%s, %s/%s, tokens=%d): %s", llm.current(), category, step, tokens, raw)
 
         try:
             sql = json.loads(raw).get("sql", "")

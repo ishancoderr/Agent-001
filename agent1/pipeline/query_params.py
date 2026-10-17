@@ -210,8 +210,8 @@ class QueryParams:
     extract_tokens: int = 0
     extracted_data: Dict[str, Any] = field(default_factory=dict)
     # The actual model each stage used for this request — QueryClassifier.model
-    # / QueryExtractor.model, which is CLASSIFY_MODEL/EXTRACT_MODEL (the env
-    # default) unless this request passed its own `model` override. Carried
+    # / QueryExtractor.model: the model id the request chose (agent1/llm), or
+    # the default (LLM_DEFAULT, config/settings.yaml llm.default). Carried
     # through so evaluation logging reports what really ran, not a guess.
     classify_model: str = ""
     extract_model: str = ""

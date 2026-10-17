@@ -13,10 +13,8 @@ per-category shaping logic and doesn't run classify()/extract() a second time.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-import openai
 from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
@@ -26,15 +24,21 @@ from .clean_query import CleanQuery
 from .query_extractor import QueryExtractor
 from .query_params import QueryParams
 from .query_parser import QueryParamsBuilder
+from .. import llm
 
 
 def run(query: str, model: str | None = None) -> QueryParams:
-    client = openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    """Understand one question. `model`: a model id from config/settings.yaml
+    (llm.models) for this question only; None keeps the current one (the
+    request's choice, set by the controller, or the default)."""
+    if model:
+        with llm.using(model):
+            return run(query)
 
     clean_query = CleanQuery(query)
     cleaned = clean_query.cleaned
 
-    classifier = QueryClassifier(client, model=model) if model else QueryClassifier(client)
+    classifier = QueryClassifier()
     query_type, tokens_classify = classifier.classify(cleaned)
 
     if query_type == "UNRELATED":
@@ -44,7 +48,7 @@ def run(query: str, model: str | None = None) -> QueryParams:
             extract_tokens=0, extracted_data={}, classify_model=classifier.model,
         )
 
-    extractor = QueryExtractor(client, model=model) if model else QueryExtractor(client)
+    extractor = QueryExtractor()
     data, tokens_extract = extractor.extract(cleaned, query_type)
     tokens_consumed = tokens_classify + tokens_extract
 

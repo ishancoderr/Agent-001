@@ -38,7 +38,17 @@ if not set(DATA_OPERATIONS) <= set(OPERATIONS):
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
 RUNTIME: Dict[str, Any] = _SETTINGS["runtime"]
-DEFAULT_MODEL: str = RUNTIME["default_model"]
+
+# ── Language models (agent1/llm/) ────────────────────────────────────────────
+LLM_MODELS: Dict[str, Dict[str, Any]] = _SETTINGS["llm"]["models"]
+LLM_DEFAULT: str = _SETTINGS["llm"]["default"]
+OPENWEIGHT_TIMEOUT_S: float = float(_SETTINGS["llm"]["openweight_timeout_s"])
+_PROVIDERS = {"openai", "anthropic", "openweight"}
+for _id, _m in LLM_MODELS.items():
+    if _m.get("provider") not in _PROVIDERS:
+        raise KeyError(f"llm.models.{_id}: provider must be one of {sorted(_PROVIDERS)}")
+if LLM_DEFAULT not in LLM_MODELS:
+    raise KeyError(f"llm.default {LLM_DEFAULT!r} is not listed under llm.models")
 PEER_RETRIES: int = int(RUNTIME["peer_retries"])
 PEER_TIMEOUT_S: Dict[str, float] = RUNTIME["peer_timeout_s"]
 

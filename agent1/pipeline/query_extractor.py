@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import date
 from typing import Any, Dict, Tuple
 
@@ -18,27 +17,26 @@ import openai
 
 from .prompt_loader import EXTRACT_TEMPLATES
 
-from ..settings import DEFAULT_MODEL
+from .. import llm
 
 log = logging.getLogger("agent1.pipeline.extractor")
 
-# Overridable per deployment via .env (see agent1/.env.example) — same
-# os.getenv(NAME, default) convention as DB_HOST etc. in database.py. A
-# single request can further override this via UserQuery.model, threaded
-# through pipeline_main.run() -> QueryExtractor(model=...); this env var only sets
-# what's used when a request doesn't ask for a specific model.
-EXTRACT_MODEL = os.getenv("EXTRACT_MODEL", DEFAULT_MODEL)       # default: config/settings.yaml
+# The model is the one the request chose (agent1/llm, config/settings.yaml).
 MAX_TOKENS = 600      # an "all states" geometry answer needs the room
 
 
 class QueryExtractor:
     """Fills in one category's fields using that category's own prompt."""
 
-    def __init__(self, client: openai.OpenAI | None = None, model: str = EXTRACT_MODEL):
-        """Reuse a passed-in OpenAI client, or make one from the env key.
-        `model` defaults to EXTRACT_MODEL but can be overridden per instance."""
-        self._client = client or openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        self.model = model
+    def __init__(self, client: openai.OpenAI | None = None):
+        """`client`: an OpenAI client to reuse when the chosen model is an
+        OpenAI one (made from the env key otherwise)."""
+        self._client = client
+
+    @property
+    def model(self) -> str:
+        """The model id answering this request (agent1/llm)."""
+        return llm.current()
 
     def extract(self, query: str, query_type: str) -> Tuple[Dict[str, Any], int]:
         """Return (fields, tokens_used).
@@ -60,18 +58,10 @@ class QueryExtractor:
         # template text, so "this year" always means the actual current year,
         # not whatever year happened to be hardcoded when the prompt was written.
         system_prompt += f"\n\nCURRENT_YEAR = {date.today().year}"
-        response = self._client.chat.completions.create(
-            model=self.model,
-            max_tokens=MAX_TOKENS,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Query: {query}"},
-            ],
+        raw, tokens = llm.complete(
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Query: {query}"}],
+            max_tokens=MAX_TOKENS, client=self._client,
         )
-        raw = response.choices[0].message.content.strip()
-        tokens = response.usage.total_tokens if response.usage else 0
         log.info("       | STEP 1b | Extract (%s, template=%s): %s  (tokens=%d)",
                  self.model, query_type, raw, tokens)
 

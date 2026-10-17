@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any, Dict, Tuple
 
 import openai
@@ -24,16 +23,12 @@ import openai
 from .prompt_loader import CLASSIFY_SYSTEM
 from .query_params import VALID_QUERY_TYPES
 
-from ..settings import DEFAULT_MODEL
+from .. import llm
 
 log = logging.getLogger("agent1.pipeline.classifier")
 
-# Overridable per deployment via .env (see agent1/.env.example) — same
-# os.getenv(NAME, default) convention as DB_HOST etc. in database.py. A
-# single request can further override this via UserQuery.model, threaded
-# through pipeline_main.run() -> QueryClassifier(model=...); this env var only sets
-# what's used when a request doesn't ask for a specific model.
-CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", DEFAULT_MODEL)       # default: config/settings.yaml
+# The model is the one the request chose (agent1/llm, config/settings.yaml
+# llm.models) — the same for classify, extract and SQL.
 
 # The prompt itself lives in config/prompts/classify.yaml, not here — see
 # prompt_loader.py's load_classify_system(). Editing the wording, categories,
@@ -66,29 +61,25 @@ def extract_json_object(raw: str) -> Dict[str, Any]:
 class QueryClassifier:
     """Picks the one category that best describes a query."""
 
-    def __init__(self, client: openai.OpenAI | None = None, model: str = CLASSIFY_MODEL):
-        """Reuse a passed-in OpenAI client, or make one from the env key.
-        `model` defaults to CLASSIFY_MODEL but can be overridden per instance."""
-        self._client = client or openai.OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-        self.model = model
+    def __init__(self, client: openai.OpenAI | None = None):
+        """`client`: an OpenAI client to reuse when the chosen model is an
+        OpenAI one (made from the env key otherwise)."""
+        self._client = client
+
+    @property
+    def model(self) -> str:
+        """The model id answering this request (agent1/llm)."""
+        return llm.current()
 
     def classify(self, query: str) -> Tuple[str, int]:
         """Return (query_type, tokens_used).
 
         An unrecognised answer falls back to DIRECT_LOOKUP, which is the only
         category that can answer something without further structure."""
-        response = self._client.chat.completions.create(
-            model=self.model,
-            max_tokens=20,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": CLASSIFY_SYSTEM},
-                {"role": "user", "content": query},
-            ],
+        raw, tokens = llm.complete(
+            [{"role": "system", "content": CLASSIFY_SYSTEM}, {"role": "user", "content": query}],
+            max_tokens=20, client=self._client,
         )
-        raw = response.choices[0].message.content.strip()
-        tokens = response.usage.total_tokens if response.usage else 0
         log.info("       | STEP 1a | Classify (%s): %s  (tokens=%d)", self.model, raw, tokens)
 
         data = extract_json_object(raw)
