@@ -227,3 +227,10 @@ finetune/questions_*.jsonl
 finetune/questions_*.md
 finetune/*_review.csv
 finetune/prompts/
+
+# Workbench accounts (bcrypt hashes) — see config/users.example.yaml
+config/users.yaml
+
+# Evaluator results and its .env
+evaluator/data/
+evaluator/.env

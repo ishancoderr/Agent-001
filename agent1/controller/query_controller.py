@@ -8,10 +8,11 @@ import logging
 import time
 import uuid
 from datetime import datetime
+from contextlib import nullcontext
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, ValidationError
 
 from ..pipeline import run as run_pipeline
@@ -19,10 +20,11 @@ from ..messaging.agent_registry import AGENT_NAME, PRIMARY_PEER
 from ..pipeline.query_params import DEFAULT_ENTITY_TYPE, RELATIONSHIP_TYPES, system_capabilities_description
 from ..retrieval.gap_detector import Exchange, answer_query, get_shapes
 from ..retrieval.spatial_compute import buffer_query, resolve_relationship, run_operation
-from ..evaluation import log_evaluation_metrics
+from ..evaluation import log_evaluation_metrics, trace
 from ..result.totals import full_total_years, year_totals
 from ..settings import LLM_MODELS, TOTAL_HINT_WINDOW_YEARS
 from .. import llm
+from ..auth import AuthUser, acting_as, current_user, require_user
 from kqml_messaging import response_status
 
 log = logging.getLogger("agent1.controller.query")
@@ -39,6 +41,9 @@ class UserQuery(BaseModel):
     llm: Optional[str] = Field(None, min_length=1, max_length=100)
     # Older field: an OpenAI model name ("gpt-4o-mini") or a model id. Prefer `llm`.
     model: Optional[str] = Field(None, min_length=1, max_length=100)
+    # For the evaluation: also return a step-by-step record of how the question
+    # was answered (agent1/evaluation/trace) under "trace".
+    trace: bool = False
 
 
 def _choice(body: UserQuery) -> Optional[str]:
@@ -53,7 +58,7 @@ def _choice(body: UserQuery) -> Optional[str]:
 
 
 @router.get("/llms")
-def list_llms():
+def list_llms(user: AuthUser = Depends(require_user)):
     """The language models a question can be answered with, and which are
     configured on this agent (their credentials are in .env)."""
     return {"default": llm.default_model(), "models": llm.options()}
@@ -125,10 +130,12 @@ class QueryResponse(BaseModel):
 
 
 @router.post("/query")
-def handle_query(body: UserQuery):
-    """Answer one question with the model it chose; the response says which."""
+def handle_query(body: UserQuery, user: AuthUser = Depends(require_user)):
+    """Answer one question for the logged-in user, with the model it chose;
+    the response says which."""
     try:
-        with llm.using(_choice(body)) as chosen:
+        with acting_as(user), llm.using(_choice(body)) as chosen, \
+                (trace.recording() if body.trace else nullcontext()) as recorded:
             if not llm.configured(chosen):
                 raise HTTPException(status_code=400, detail=(
                     f"{LLM_MODELS[chosen]['label']} is not configured on {AGENT_NAME} — "
@@ -138,6 +145,8 @@ def handle_query(body: UserQuery):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     data = result.model_dump() if isinstance(result, BaseModel) else dict(result)
     data["llm"] = {"id": chosen, "label": LLM_MODELS[chosen]["label"]}
+    if recorded is not None:
+        data["trace"] = recorded.to_dict()
     return data
 
 
@@ -152,6 +161,7 @@ def _answer(body: UserQuery):
     log.info(SEPARATOR)
     log.info("       │ Request ID : %s", request_id)
     log.info("       │ Query      : %r", body.query)
+    log.info("       │ User       : %s", current_user())
 
     # ── Step 1: understand the question (clean, classify, extract params) ────
     log.info("STEP 1 │ Parsing natural-language query with %s ...", llm.entry()["label"])

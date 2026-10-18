@@ -107,6 +107,29 @@ llm:
   # A self-hosted model answers one request at a time; allow for queueing.
   openweight_timeout_s: 300
 
+# ── Login ───────────────────────────────────────────────────────────────────
+
+# Who may use the workbench and /query: the accounts in config/<users_file>
+# (bcrypt hashes; managed with `python -m agent1.auth add-user <name>`; the
+# file is git-ignored). A login sets a signed session cookie that both agents
+# accept, because they share AUTH_SECRET from .env. KQML between the agents
+# doesn't use a login; it carries AGENT_SHARED_KEY instead.
+auth:
+  session_hours: 8
+  cookie_name: geoquery_session
+  max_failed_logins: 5          # wrong passwords in a row before a username is locked
+  lockout_minutes: 10
+  users_file: users.yaml        # in config/; USERS_FILE in .env overrides the path
+
+# ── Evaluator ────────────────────────────────────────────────────────────────
+# The test runner behind the workbench's Evaluation tab. Its "Start evaluator"
+# button asks this agent to start it (agent1/evaluation/evaluator_launcher.py)
+# when the folder exists in this agent's repository; its own settings are in
+# <module>/settings.yaml.
+evaluator:
+  module: evaluator
+  start_timeout_s: 30
+
 # ── Runtime ──────────────────────────────────────────────────────────────────
 
 runtime:

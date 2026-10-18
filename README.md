@@ -319,6 +319,38 @@ pip install -r requirements.txt
 uvicorn agent1.main:app --port 8000 --reload
 ```
 
+### 4. Login
+
+`/query` and `/llms` answer only a logged-in user; `/health` stays open, and `/kqml/receive`
+takes the agents' shared key instead. Add the secrets to **both** agents' `.env`, with the
+**same** values in each:
+
+```env
+AUTH_SECRET=<long random value>        # signs the session cookie, so a login works on both agents
+AGENT_SHARED_KEY=<long random value>   # sent by each agent to the other as X-Agent-Key
+COOKIE_SECURE=false                    # only on a computer without HTTPS; leave out on EC2
+```
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"      # a random value
+python -m agent1.auth add-user ishan --name "Ishan Weerakoon"      # asks for the password
+python -m agent1.auth list-users
+python -m agent1.auth remove-user ishan
+```
+
+Accounts are kept in `config/users.yaml` as bcrypt hashes (git-ignored; see
+`config/users.example.yaml`). Settings are under `auth` in `config/settings.yaml`: session length
+(8 h), cookie name, and the lockout (5 wrong passwords, 10 minutes).
+
+| Endpoint | Needs |
+|---|---|
+| `POST /auth/login` `{username, password}` | nothing; sets the session cookie (HttpOnly, SameSite=Strict, Secure unless `COOKIE_SECURE=false`) |
+| `POST /auth/logout` | nothing; clears the cookie |
+| `GET /auth/me` | session |
+| `POST /query`, `GET /llms` | session, else 401 |
+| `POST /kqml/receive` | `X-Agent-Key`, else 401 |
+| `GET /health` | nothing |
+
 ---
 
 ## API endpoints
@@ -332,6 +364,9 @@ curl -X POST http://localhost:8000/query \
 ```
 
 `llm` is optional (default: `LLM_DEFAULT`). The response carries `"llm": {"id": …, "label": …}`.
+With `"trace": true` it also carries `"trace"`: every LLM call (stage, model, input/output
+tokens, ms), every SQL attempt (passed the safety check, ran, error), the KQML round trips and
+the classify/extract results — what the evaluator scores.
 
 | Status | Meaning |
 |---|---|
@@ -380,6 +415,10 @@ returns a KQML `tell`.
 Every request also writes a full step-by-step trace — including the exact KQML `ask`/`tell`
 JSON exchanged — to `evaluation_metrics.log`, useful for debugging exactly what a peer was
 asked and what it answered.
+
+**Evaluation.** `python -m evaluator` runs the test questions over the chosen models and
+scores correctness, tokens, response time, consistency and symmetry; the workbench's
+Evaluation tab drives it and downloads the results as CSV. See `evaluator/README.md`.
 
 ---
 

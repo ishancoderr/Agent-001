@@ -78,7 +78,7 @@ class QueryClassifier:
         category that can answer something without further structure."""
         raw, tokens = llm.complete(
             [{"role": "system", "content": CLASSIFY_SYSTEM}, {"role": "user", "content": query}],
-            max_tokens=20, client=self._client,
+            max_tokens=20, client=self._client, stage="classify",
         )
         log.info("       | STEP 1a | Classify (%s): %s  (tokens=%d)", self.model, raw, tokens)
 
@@ -91,4 +91,6 @@ class QueryClassifier:
             log.warning("       | STEP 1a | Unknown query_type %r - defaulting to DIRECT_LOOKUP",
                         query_type)
             query_type = "DIRECT_LOOKUP"
+        from ..evaluation import trace
+        trace.record("classify", query_type)
         return query_type, tokens

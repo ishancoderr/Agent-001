@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -95,19 +96,24 @@ def clean(text: str) -> str:
     return fenced.group(1).strip() if fenced else text
 
 
-def complete(messages: List[Dict[str, str]], max_tokens: int, client: Any = None) -> Tuple[str, int]:
+def complete(messages: List[Dict[str, str]], max_tokens: int, client: Any = None,
+             stage: str = "llm", **meta: Any) -> Tuple[str, int]:
     """Send one chat (system + user messages) to the current model and return
     (answer text, total tokens). `client` is an OpenAI client to reuse, used
-    only by OpenAI models."""
+    only by OpenAI models. `stage` (classify / extract / sql) and `meta` go into
+    the evaluation trace with the tokens and time (agent1/evaluation/trace)."""
+    from ..evaluation import trace
     spec = entry()
     provider = spec["provider"]
+    started = time.perf_counter()
     if provider == "openai":
         from . import openai_provider as p
-        text, tokens = p.complete(spec, messages, max_tokens, client)
+        text, inp, out = p.complete(spec, messages, max_tokens, client)
     elif provider == "anthropic":
         from . import anthropic_provider as p
-        text, tokens = p.complete(spec, messages, max_tokens)
+        text, inp, out = p.complete(spec, messages, max_tokens)
     else:
         from . import openweight_provider as p
-        text, tokens = p.complete(spec, messages, max_tokens)
-    return clean(text), tokens
+        text, inp, out = p.complete(spec, messages, max_tokens)
+    trace.record_llm(stage, spec["id"], inp, out, (time.perf_counter() - started) * 1000, **meta)
+    return clean(text), inp + out

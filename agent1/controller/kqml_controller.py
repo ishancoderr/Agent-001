@@ -12,11 +12,15 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Header
 from pydantic import BaseModel
 
 from kqml_messaging import Encoding, Language, MissingSlot, MissingGeometrySlot, Ontology
 
+from .. import llm
+from ..auth import require_agent_key
+from ..evaluation import trace
+from ..settings import LLM_MODELS
 from ..messaging.agent_registry import AGENT_NAME
 from ..pipeline.query_params import DEFAULT_ZONE_TARGET, ENTITY_SRID, ZONE_SEARCH_TYPES
 from ..retrieval.gap_detector import lookup_for_peer, shapes_for_peer
@@ -39,8 +43,22 @@ class KQMLMessage(BaseModel):
     content:     Dict[str, Any]
 
 
-@router.post("/kqml/receive")
-def receive_kqml(msg: KQMLMessage):
+# Only the peer agents call this, so it takes the shared agent key (X-Agent-Key),
+# not a user's login.
+@router.post("/kqml/receive", dependencies=[Depends(require_agent_key)])
+def receive_kqml(msg: KQMLMessage, x_llm_model: Optional[str] = Header(None)):
+    """Answer a peer's ask with the model the asker is using (X-LLM-Model), so
+    one question runs on one model end to end, and report the tokens spent."""
+    asked = x_llm_model if x_llm_model in LLM_MODELS and llm.configured(x_llm_model) else None
+    if x_llm_model and asked is None:
+        log.warning("KQML   │ asker's model %r is not available here — answering with the default", x_llm_model)
+    with llm.using(asked), trace.recording() as spent:
+        reply = _receive(msg)
+    reply["metadata"] = {"token_usage": spent.tokens()["total"]}
+    return reply
+
+
+def _receive(msg: KQMLMessage) -> Dict[str, Any]:
     log.info(SEPARATOR)
     log.info("                       START")
     log.info("       Incoming KQML request received by %s", AGENT_NAME)
@@ -129,7 +147,7 @@ def receive_kqml(msg: KQMLMessage):
         "language":     Language.GEOKQML.value,
         "encoding":     Encoding.JSON.value,
         "ontology":     Ontology.GEO_MISSINGNESS_V2.value,
-        "metadata":     {"token_usage": 0},
+        "metadata":     {"token_usage": 0},              # set by receive_kqml from the trace
         "content": {
             "found_slots":        found_slots,
             "missing_slots":      missing_slots,

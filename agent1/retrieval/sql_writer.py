@@ -27,6 +27,7 @@ defence, not the only one that should exist.
 from __future__ import annotations
 
 import json
+import time
 import logging
 import re
 from dataclasses import dataclass
@@ -420,7 +421,7 @@ class SqlWriter:
         user = json.dumps(payload, ensure_ascii=False, default=str)
         raw, tokens = llm.complete(
             [{"role": "system", "content": self._system_prompt(category, step)}, {"role": "user", "content": user}],
-            max_tokens=500, client=self._client,
+            max_tokens=500, client=self._client, stage="sql", category=category, step=step,
         )
         self.tokens_used += tokens
         log.info("       | SqlWriter (%s, %s/%s, tokens=%d): %s", llm.current(), category, step, tokens, raw)
@@ -470,13 +471,22 @@ def write_and_run(question: str, category: str, step: str, shown: Dict[str, Any]
     """Write a statement, run it, return its rows. If the statement fails a
     check or the database rejects it, the error goes back to the model once
     so it can correct itself; a second failure is raised."""
+    from ..evaluation import trace
     error = ""
     for attempt in (1, 2):
+        started = time.perf_counter()
+        passed = False
         try:
             built = writer().write(question, category, step, shown, bind, label, previous_error=error,
                                    must_use=must_use)
-            return run(built, required, queries)
+            passed = True                           # it passed the safety check; now the database
+            rows = run(built, required, queries)
+            trace.record_sql(category, step, label, attempt, True, True, len(rows), None,
+                             (time.perf_counter() - started) * 1000)
+            return rows
         except Exception as exc:                    # noqa: BLE001 — retried once, then raised
+            trace.record_sql(category, step, label, attempt, passed, False, None,
+                             str(exc).split("\n[SQL:")[0], (time.perf_counter() - started) * 1000)
             if attempt == 2:
                 raise ValueError(f"SQL for {category}/{step} failed twice: {exc}") from exc
             error = str(exc).split("\n[SQL:")[0][:500]

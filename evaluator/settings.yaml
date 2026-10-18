@@ -1,0 +1,88 @@
+# Evaluator settings — the test runner behind the workbench's Evaluation tab.
+# Everything the evaluator does is set here; the models themselves come from
+# the agents (GET /llms, i.e. config/settings.yaml `llm.models`).
+
+port: 8002
+# 127.0.0.1: reached through the workbench's proxy (nginx on EC2), never directly.
+host: 127.0.0.1
+
+# The agent each question is asked of, and the peer the symmetry run asks the
+# same question once. URLs can be overridden in evaluator/.env (url_env).
+agents:
+  primary: {name: Agent-001, url_env: AGENT1_URL, url: "http://localhost:8000"}
+  peer:    {name: Agent-002, url_env: AGENT2_URL, url: "http://localhost:8001"}
+
+# The answer key (expected category and extraction per question). Relative
+# paths are relative to this file; EVALUATOR_TEST_SET in .env overrides it.
+test_set: ../finetune/test_set_v2.yaml
+
+# Results database (SQLite, git-ignored); EVALUATOR_DATABASE overrides it.
+database: data/evaluation.sqlite
+
+# How often each question is asked of the primary agent, per model, for the
+# consistency measure. The setup form starts from these numbers.
+repeats:
+  default: 5
+  per_model: {gpt-4: 1, claude-opus: 1}
+
+# Ask every question once of the peer as well (symmetry). The setup form can
+# turn it off per run.
+symmetry: true
+
+# One question can take minutes on the open-weight models.
+request_timeout_s: 900
+
+# Transient failures (agent restarting, rate limit, provider overloaded) are
+# retried; anything else is recorded as the answer. When an agent stays
+# unreachable after the last retry the run pauses instead of failing every ask.
+retries:
+  attempts: 3
+  backoff_s: [10, 30, 90]
+  on_status: [429, 500, 502, 503, 504]
+
+# Carry on with the run that was going when the evaluator stopped.
+resume_on_start: true
+
+# ── how answers are compared (consistency, symmetry, the expected answer) ────
+# An answer is reduced to a fingerprint: these keys are dropped wherever they
+# appear (timings, tokens, ids and which agent supplied a row, which differ
+# between two correct answers), numbers are rounded, lists are compared
+# regardless of order, and a shape is compared by its rounded vertices.
+fingerprint:
+  ignore_keys: [request_id, performance, provenance, summary, message, llm, trace,
+                source, sources, reference_source, miss_mode_local, kqml_turns]
+  # From the response's `query` block only these are part of the answer.
+  query_keys: [type]
+  decimals: 4
+  wkt_decimals: 5
+
+# How an extraction is compared with the answer key. Lists compare regardless
+# of order, except that for these categories and fields the FIRST element
+# must match too (Difference: the shape that is reduced; BufferWithin: the
+# reference city). Place names are compared after the agent's own name
+# normalisation (config/schema/name_aliases.yaml).
+extract_compare:
+  first_matters:
+    SPATIAL_OPERATION: [spatial]
+  name_fields: [spatial, refs, subject, entity_name]
+
+# USD per million tokens, for the cost columns and the estimate. CHECK THESE
+# against the providers' price pages before reporting costs — prices change.
+# Self-hosted models cost GPU time, not tokens: 0 here.
+pricing_usd_per_mtok:
+  gpt-4o-mini:   {input: 0.15, output: 0.60}
+  gpt-4:         {input: 30.0, output: 60.0}
+  gpt-4o:        {input: 2.50, output: 10.0}
+  claude-haiku:  {input: 1.00, output: 5.00}
+  claude-opus:   {input: 5.00, output: 25.0}
+  qwen3-8b:      {input: 0, output: 0}
+  qwen3-8b-lora: {input: 0, output: 0}
+
+# The estimate before a run, for a model that has no finished asks yet (after
+# that, its own measured averages are used).
+estimate:
+  tokens_per_ask: 12000
+  output_share: 0.04
+  seconds_per_ask:
+    default: 20
+    per_provider: {openai: 15, anthropic: 20, openweight: 60}

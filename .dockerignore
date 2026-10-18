@@ -1,0 +1,17 @@
+# Kept out of the image: secrets, local state, the dev environment, and the
+# training data (only the test-set answer key is needed, by the evaluator).
+.git
+.gitignore
+.claude
+venv
+.venv
+**/__pycache__
+**/*.pyc
+**/.env
+*.log
+config/users.yaml
+evaluator/data
+finetune/*
+!finetune/test_set_v2.yaml
+Dockerfile
+.dockerignore

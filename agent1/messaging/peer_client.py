@@ -20,7 +20,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List
 
+import os
+import time
+
 import httpx
+
+from .. import llm
 
 from kqml_messaging import (FoundGeometrySlot, MessageFactory,
                             MissingGeometrySlot, MissingSlot)
@@ -48,10 +53,20 @@ class PeerClient:
         self.sender = sender or AGENT_NAME
 
     def _post(self, payload: dict) -> dict:
+        from ..evaluation import trace
         log.info("       | Posting to %s ...", self.url)
-        response = httpx.post(f"{self.url}/kqml/receive", json=payload, timeout=TIMEOUT)
+        started = time.perf_counter()
+        # The peer's /kqml/receive takes only the shared agent key (agent1/auth).
+        # X-LLM-Model: the peer answers with the model this question uses (agent1/llm).
+        response = httpx.post(f"{self.url}/kqml/receive", json=payload, timeout=TIMEOUT,
+                              headers={"X-Agent-Key": os.environ.get("AGENT_SHARED_KEY", ""),
+                                       "X-LLM-Model": llm.current()})
+        ok = response.is_success
+        body = response.json() if ok else {}
+        trace.record_kqml(self.name, (time.perf_counter() - started) * 1000,
+                          ((body.get("metadata") or {}).get("token_usage") or 0), ok)
         response.raise_for_status()
-        return response.json()
+        return body
 
     def ask_data(self, gaps: List[GapSlot], request_id: str = "") -> Dict[str, Any]:
         """Ask for values. One entry per gap block, because states missing

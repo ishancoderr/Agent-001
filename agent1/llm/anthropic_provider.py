@@ -21,7 +21,7 @@ THINKING_HEADROOM = 4000
 _client: anthropic.Anthropic | None = None
 
 
-def complete(spec: Dict[str, Any], messages: List[Dict[str, str]], max_tokens: int) -> Tuple[str, int]:
+def complete(spec: Dict[str, Any], messages: List[Dict[str, str]], max_tokens: int) -> Tuple[str, int, int]:
     global _client
     if _client is None:
         from . import credential
@@ -44,4 +44,4 @@ def complete(spec: Dict[str, Any], messages: List[Dict[str, str]], max_tokens: i
     if response.stop_reason == "max_tokens":
         log.warning("       | %s hit max_tokens — the answer may be cut off", response.model)
     text = "".join(block.text for block in response.content if block.type == "text")
-    return text.strip(), response.usage.input_tokens + response.usage.output_tokens
+    return text.strip(), response.usage.input_tokens, response.usage.output_tokens

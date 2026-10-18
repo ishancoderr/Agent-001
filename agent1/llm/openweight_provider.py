@@ -18,7 +18,7 @@ import httpx
 from ..settings import OPENWEIGHT_TIMEOUT_S
 
 
-def complete(spec: Dict[str, Any], messages: List[Dict[str, str]], max_tokens: int) -> Tuple[str, int]:
+def complete(spec: Dict[str, Any], messages: List[Dict[str, str]], max_tokens: int) -> Tuple[str, int, int]:
     response = httpx.post(
         os.environ["QWEN_HOST"].rstrip("/") + spec["path"],
         headers={"X-API-Key": os.environ["QWEN_API_KEY"]},
@@ -27,4 +27,5 @@ def complete(spec: Dict[str, Any], messages: List[Dict[str, str]], max_tokens: i
     )
     response.raise_for_status()
     answer = response.json()
-    return (answer.get("content") or "").strip(), int(answer.get("total_tokens") or 0)
+    return ((answer.get("content") or "").strip(), int(answer.get("prompt_tokens") or 0),
+            int(answer.get("completion_tokens") or 0))

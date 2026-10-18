@@ -10,7 +10,7 @@ _client: openai.OpenAI | None = None
 
 
 def complete(spec: Dict[str, Any], messages: List[Dict[str, str]], max_tokens: int,
-             client: openai.OpenAI | None = None) -> Tuple[str, int]:
+             client: openai.OpenAI | None = None) -> Tuple[str, int, int]:
     global _client
     if client is None:
         if _client is None:
@@ -26,4 +26,5 @@ def complete(spec: Dict[str, Any], messages: List[Dict[str, str]], max_tokens: i
         **json_mode,
     )
     text = (response.choices[0].message.content or "").strip()
-    return text, response.usage.total_tokens if response.usage else 0
+    u = response.usage
+    return text, (u.prompt_tokens if u else 0), (u.completion_tokens if u else 0)

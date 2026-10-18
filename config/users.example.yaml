@@ -1,0 +1,8 @@
+# Workbench accounts — copy nothing from here; create real ones with
+#   python -m agent1.auth add-user <username> --name "Full Name"
+# which writes config/users.yaml (git-ignored). Each entry holds a display
+# name and a bcrypt hash of the password, never the password itself.
+users:
+  example:
+    name: Example User
+    password_hash: $2b$12$replace.this.with.a.real.bcrypt.hash.from.add-user........

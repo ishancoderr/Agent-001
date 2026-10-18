@@ -7,6 +7,8 @@ openai>=1.30.0
 anthropic>=1.0
 python-dotenv==1.0.1
 pydantic>=2.0
+bcrypt>=4.1
+PyJWT>=2.8
 PyYAML>=6.0
 sqlglot>=30.0
 # needs >= 2.3.0. A direct URL cannot carry a version specifier (PEP 508),

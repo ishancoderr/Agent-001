@@ -30,6 +30,7 @@ from typing import Any, Dict
 
 _LOG_PATH = Path(__file__).parent.parent.parent / "evaluation_metrics.log"
 
+from ..auth.session import current_user
 from ..messaging.agent_registry import AGENT_NAME, PRIMARY_PEER
 
 _metrics_log = logging.getLogger("agent1.evaluation.metrics")
@@ -122,6 +123,7 @@ def log_evaluation_metrics(metrics: Dict[str, Any]) -> None:
     block = (
         f"\n{_LINE}\n"
         f"REQUEST ID : {m.get('request_id', 'n/a')}\n"
+        f"USER       : {m.get('user') or current_user() or 'n/a'}\n"
         f"TIMESTAMP  : {m.get('timestamp', 'n/a')}\n"
         f"{_SEP}\n"
         f"Query      : {m.get('query', '')}\n"

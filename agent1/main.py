@@ -1,8 +1,10 @@
 """
 Agent 1 – FastAPI entry point
-  POST /query          ← user submits a natural-language query
-  POST /kqml/receive   ← peer agents send KQML 'ask' messages here
-  GET  /health         ← liveness probe
+  POST /auth/login     ← a workbench user logs in (session cookie)
+  POST /query          ← a logged-in user submits a natural-language query
+  GET  /llms           ← the language models a question can use (logged in)
+  POST /kqml/receive   ← peer agents send KQML 'ask' messages here (agent key)
+  GET  /health         ← liveness probe (open)
 """
 from __future__ import annotations
 
@@ -10,7 +12,9 @@ import logging
 
 from fastapi import FastAPI
 
+from .auth import router as auth_router
 from .controller import query_router, kqml_router
+from .evaluation.evaluator_launcher import router as evaluator_router
 from .messaging.agent_registry import AGENT_NAME
 
 logging.basicConfig(
@@ -23,8 +27,10 @@ log = logging.getLogger("agent1")
 
 app = FastAPI(title=f"{AGENT_NAME} – Geospatial Missing Data", version="1.0.0")
 
+app.include_router(auth_router)
 app.include_router(query_router)
 app.include_router(kqml_router)
+app.include_router(evaluator_router)
 
 # The minimum version of the shared KQML library this agent's code needs.
 # Raise it whenever this agent starts using something the library only gained

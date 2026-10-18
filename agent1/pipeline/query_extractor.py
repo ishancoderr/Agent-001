@@ -60,13 +60,16 @@ class QueryExtractor:
         system_prompt += f"\n\nCURRENT_YEAR = {date.today().year}"
         raw, tokens = llm.complete(
             [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"Query: {query}"}],
-            max_tokens=MAX_TOKENS, client=self._client,
+            max_tokens=MAX_TOKENS, client=self._client, stage="extract", category=query_type,
         )
         log.info("       | STEP 1b | Extract (%s, template=%s): %s  (tokens=%d)",
                  self.model, query_type, raw, tokens)
 
         try:
-            return json.loads(raw), tokens
+            data = json.loads(raw)
+            from ..evaluation import trace
+            trace.record("extract", data)
+            return data, tokens
         except json.JSONDecodeError as exc:
             # response_format=json_object makes this very unlikely, but a bad
             # parse must not take the whole query down: an empty dict lets the
