@@ -66,6 +66,14 @@ extract_compare:
     SPATIAL_OPERATION: [spatial]
   name_fields: [spatial, refs, subject, entity_name]
 
+# The KQML messages in the CSV files (columns kqml_sent / kqml_received):
+# geometry text longer than wkt_max_chars is shortened to its start and its
+# number of points, and a cell is cut at cell_max_chars (Excel's cell limit
+# is 32,767). The full messages stay in the stored response (GET /asks/{id}).
+csv:
+  wkt_max_chars: 160
+  cell_max_chars: 32000
+
 # USD per million tokens, for the cost columns and the estimate. CHECK THESE
 # against the providers' price pages before reporting costs — prices change.
 # Self-hosted models cost GPU time, not tokens: 0 here.

@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from ..auth import AuthUser, require_user
 from ..messaging.agent_registry import AGENT_NAME
 from ..settings import EVALUATOR
+from .log_files import LOG_DIR
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/evaluator", tags=["evaluator"])
@@ -61,7 +62,7 @@ def _status() -> Dict[str, Any]:
         return {"installed": False, "running": False, "agent": AGENT_NAME}
     health = _running()
     return {"installed": True, "running": health is not None, "agent": AGENT_NAME,
-            "pid": (health or {}).get("pid"), "log": str(PACKAGE / "data" / "evaluator.log")}
+            "pid": (health or {}).get("pid"), "log": str(LOG_DIR / "evaluator.log")}
 
 
 @router.get("/status")
@@ -99,9 +100,11 @@ def start(user: AuthUser = Depends(require_user)):
 def _start(user: AuthUser) -> Dict[str, Any]:
     if _running():
         return _status()
-    logs = PACKAGE / "data"
-    logs.mkdir(parents=True, exist_ok=True)
-    out = open(logs / "evaluator.log", "ab")
+    # The evaluator writes its own daily log (LOG_DIR/evaluator.log); this file
+    # only catches what it prints before that is set up, e.g. a failed start.
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    console = LOG_DIR / "evaluator-start.log"
+    out = open(console, "wb")
     env = {**os.environ, "PYTHONPATH": str(ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")}
     proc = _spawn([sys.executable, "-X", "utf8", "-m", EVALUATOR["module"]], env, out)
     out.close()
@@ -110,9 +113,9 @@ def _start(user: AuthUser) -> Dict[str, Any]:
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise HTTPException(500, f"The evaluator stopped right away (exit code {proc.returncode}) — "
-                                     f"see {logs / 'evaluator.log'}")
+                                     f"see {console}")
         if _running():
             return _status()
         time.sleep(0.5)
     raise HTTPException(504, f"The evaluator did not answer within {EVALUATOR['start_timeout_s']} s — "
-                             f"see {logs / 'evaluator.log'}")
+                             f"see {console}")

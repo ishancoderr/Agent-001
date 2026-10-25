@@ -228,6 +228,9 @@ finetune/questions_*.md
 finetune/*_review.csv
 finetune/prompts/
 
+# Log files (config/settings.yaml logs)
+logs/
+
 # Workbench accounts (bcrypt hashes) — see config/users.example.yaml
 config/users.yaml
 

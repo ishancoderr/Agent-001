@@ -40,6 +40,7 @@ if not set(DATA_OPERATIONS) <= set(OPERATIONS):
 RUNTIME: Dict[str, Any] = _SETTINGS["runtime"]
 AUTH: Dict[str, Any] = _SETTINGS["auth"]                 # login settings (agent1/auth)
 EVALUATOR: Dict[str, Any] = _SETTINGS["evaluator"]       # starting it from the workbench
+LOGS: Dict[str, Any] = _SETTINGS["logs"]                 # log folder and how long files are kept
 CONFIG_DIR: Path = _CONFIG
 
 # ── Language models (agent1/llm/) ────────────────────────────────────────────

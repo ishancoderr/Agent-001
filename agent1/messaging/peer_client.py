@@ -64,7 +64,9 @@ class PeerClient:
         ok = response.is_success
         body = response.json() if ok else {}
         trace.record_kqml(self.name, (time.perf_counter() - started) * 1000,
-                          ((body.get("metadata") or {}).get("token_usage") or 0), ok)
+                          ((body.get("metadata") or {}).get("token_usage") or 0), ok,
+                          sent=payload, received=body if ok else
+                          {"error": f"HTTP {response.status_code}", "body": response.text[:1000]})
         response.raise_for_status()
         return body
 

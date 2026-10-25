@@ -1,6 +1,8 @@
 """
-Writes structured evaluation metrics to evaluation_metrics.log (project root).
-Uses its own FileHandler so nothing leaks into the uvicorn console.
+Writes structured evaluation metrics to logs/evaluation_metrics.log — one
+file per day, deleted after a few days (config/settings.yaml `logs`,
+agent1/evaluation/log_files.py). Uses its own handler so nothing leaks into
+the uvicorn console.
 
 Every request — whatever category it lands in (DIRECT_LOOKUP, a spatial
 relationship, GEOMETRY_LOOKUP, SPATIAL_OPERATION, SPATIAL_RELATIONSHIP_BUFFER,
@@ -28,16 +30,15 @@ import logging
 from pathlib import Path
 from typing import Any, Dict
 
-_LOG_PATH = Path(__file__).parent.parent.parent / "evaluation_metrics.log"
-
 from ..auth.session import current_user
 from ..messaging.agent_registry import AGENT_NAME, PRIMARY_PEER
+from .log_files import daily_file_handler
 
 _metrics_log = logging.getLogger("agent1.evaluation.metrics")
 _metrics_log.propagate = False  # no console output
 
 if not _metrics_log.handlers:
-    _fh = logging.FileHandler(_LOG_PATH, encoding="utf-8")
+    _fh = daily_file_handler("evaluation_metrics.log")
     _fh.setFormatter(logging.Formatter("%(message)s"))
     _metrics_log.addHandler(_fh)
     _metrics_log.setLevel(logging.INFO)

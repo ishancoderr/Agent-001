@@ -159,7 +159,7 @@ Agent-001/
     │   └── merger.py                ← combine this agent's + the peer's records, sorted
     │
     └── evaluation/
-        └── metrics_logger.py        ← writes evaluation_metrics.log (full ask/tell trace per request)
+        └── metrics_logger.py        ← writes logs/evaluation_metrics.log (full ask/tell trace per request)
 ```
 
 The shared package **`kqml-messaging`** (a separate repo,
@@ -413,7 +413,7 @@ returns a KQML `tell`.
 ## Developer tools
 
 Every request also writes a full step-by-step trace — including the exact KQML `ask`/`tell`
-JSON exchanged — to `evaluation_metrics.log`, useful for debugging exactly what a peer was
+JSON exchanged — to `logs/evaluation_metrics.log` (a new file each day, deleted after `logs.keep_days` days, config/settings.yaml), useful for debugging exactly what a peer was
 asked and what it answered.
 
 **Evaluation.** `python -m evaluator` runs the test questions over the chosen models and

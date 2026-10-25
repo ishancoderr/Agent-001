@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent1.pipeline.gazetteer import _normalize_key, normalize_entity_name
 
-from .config import EXTRACT_COMPARE, FINGERPRINT, PRICING
+from .config import CSV, EXTRACT_COMPARE, FINGERPRINT, PRICING
 
 _IGNORE = set(FINGERPRINT["ignore_keys"])
 _QUERY_KEYS = list(FINGERPRINT["query_keys"])
@@ -61,6 +61,32 @@ def _canon(value: Any) -> Any:
     if isinstance(value, str) and _WKT.match(value):
         return _shape(value)
     return value
+
+
+def _short_wkt(value: Any) -> Any:
+    """KQML messages for a CSV cell: long geometry text cut to its start and
+    its number of points; everything else as it was sent."""
+    if isinstance(value, dict):
+        return {k: _short_wkt(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_short_wkt(v) for v in value]
+    limit = int(CSV["wkt_max_chars"])
+    if isinstance(value, str) and len(value) > limit and _WKT.match(value):
+        points = len(_NUMBER.findall(value.split(";", 1)[-1])) // 2
+        return f"{value[:limit]}… [{points} points]"
+    return value
+
+
+def kqml_messages(trace: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    """The KQML messages of one ask, as JSON lists (one entry per exchange)."""
+    exchanges = (trace.get("kqml") or {}).get("exchanges") or []
+    cap = int(CSV["cell_max_chars"])
+    out: Dict[str, Optional[str]] = {}
+    for key, field in (("kqml_sent", "sent"), ("kqml_received", "received")):
+        msgs = [_short_wkt(x.get(field)) for x in exchanges if x.get(field) is not None]
+        text = json.dumps(msgs, ensure_ascii=False) if msgs else None
+        out[key] = text if text is None or len(text) <= cap else text[:cap] + "… [cut]"
+    return out
 
 
 def answer_view(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -284,6 +310,7 @@ def score(q: Dict[str, Any], model: str, response: Optional[Dict[str, Any]],
         out[f"ms_{stage}"] = (stages.get(stage) or {}).get("ms", 0.0)
     out["ms_kqml"] = kqml.get("ms", 0.0)
     out["kqml_turns"] = kqml.get("turns", 0)
+    out.update(kqml_messages(t))
 
     view = answer_view(response)
     out["answer_status"] = response.get("status")

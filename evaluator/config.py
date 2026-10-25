@@ -23,6 +23,7 @@ FINGERPRINT: Dict[str, Any] = SETTINGS["fingerprint"]
 EXTRACT_COMPARE: Dict[str, Any] = SETTINGS["extract_compare"]
 PRICING: Dict[str, Dict[str, float]] = SETTINGS.get("pricing_usd_per_mtok") or {}
 ESTIMATE: Dict[str, Any] = SETTINGS["estimate"]
+CSV: Dict[str, Any] = SETTINGS["csv"]
 
 # Agent roles: "primary" is asked every repeat, "peer" once (symmetry).
 AGENTS: Dict[str, Dict[str, str]] = {

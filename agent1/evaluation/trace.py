@@ -2,7 +2,8 @@
 A step-by-step record of how one question was answered, for the evaluation.
 
 While a request runs inside `recording()`, every LLM call (classify, extract,
-each SQL statement) and every SQL attempt is added to the current Trace:
+each SQL statement), every SQL attempt and every KQML exchange (both
+messages) is added to the current Trace:
 which model, input and output tokens, milliseconds, and for SQL whether the
 statement passed the safety check, whether it ran, and the error if not.
 /query returns it when the request asks for "trace": true; /kqml/receive uses
@@ -99,11 +100,14 @@ def record_sql(category: str, step: str, label: str, attempt: int, passed_check:
                                "error": (error or "")[:300] or None, "ms": round(ms, 1)})
 
 
-def record_kqml(peer: str, ms: float, peer_tokens: int, ok: bool) -> None:
-    """One ask → tell round trip to a peer agent."""
+def record_kqml(peer: str, ms: float, peer_tokens: int, ok: bool,
+                sent: Optional[Dict[str, Any]] = None, received: Optional[Dict[str, Any]] = None) -> None:
+    """One ask → tell round trip to a peer agent, with both KQML messages as
+    they went over the wire (the ask this agent sent, the peer's reply)."""
     t = _current.get()
     if t is not None:
-        t.kqml.append({"peer": peer, "ms": round(ms, 1), "peer_tokens": int(peer_tokens or 0), "ok": ok})
+        t.kqml.append({"peer": peer, "ms": round(ms, 1), "peer_tokens": int(peer_tokens or 0), "ok": ok,
+                       "sent": sent, "received": received})
 
 
 def record(key: str, value: Any) -> None:

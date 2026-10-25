@@ -23,7 +23,7 @@ from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional
 
 from . import store
-from .scoring import consistency
+from .scoring import consistency, kqml_messages
 
 
 # ── verdicts ─────────────────────────────────────────────────────────────────
@@ -220,8 +220,10 @@ def steps(run_ids: List[int]) -> List[Dict[str, Any]]:
                         "step": s.get("step"), "attempt": s.get("attempt"), "passed_check": int(s["passed_check"]),
                         "ran": int(s["ran"]), "rows": s.get("rows"), "error": s.get("error"), "ms": s.get("ms")})
         for i, k in enumerate((t.get("kqml") or {}).get("exchanges") or [], 1):
+            msgs = kqml_messages({"kqml": {"exchanges": [k]}})
             out.append({**base, "kind": "kqml", "n": i, "stage": "kqml", "peer": k.get("peer"),
-                        "peer_tokens": k.get("peer_tokens"), "ok": int(bool(k.get("ok"))), "ms": k.get("ms")})
+                        "peer_tokens": k.get("peer_tokens"), "ok": int(bool(k.get("ok"))), "ms": k.get("ms"),
+                        "kqml_sent": msgs["kqml_sent"], "kqml_received": msgs["kqml_received"]})
     return out
 
 
@@ -231,7 +233,8 @@ ASK_COLUMNS = [
     "sql_steps", "sql_attempts", "sql_first_try_ok", "sql_passed_check", "sql_ran", "sql_errors",
     "answer_status", "answer_type", "answer_summary", "fingerprint", "answer_verdict", "verdict_source", "suggestion",
     "tokens_in", "tokens_out", "peer_tokens", "tokens_total", "cost_usd",
-    "wall_ms", "ms_agent", "ms_classify", "ms_extract", "ms_sql", "ms_kqml", "kqml_turns", "llm_calls", "models_used",
+    "wall_ms", "ms_agent", "ms_classify", "ms_extract", "ms_sql", "ms_kqml", "kqml_turns", "kqml_sent", "kqml_received",
+    "llm_calls", "models_used",
     "n_places", "n_years", "n_attributes", "status", "http_status", "error", "tries", "started_at", "finished_at",
 ]
 
@@ -243,7 +246,8 @@ MODEL_FILE_COLUMNS = [
     "answer_status", "answer_summary", "answer_verdict", "verdict_source", "suggestion", "answer_view",
     "question_consistency", "question_distinct_answers", "question_symmetric",
     "tokens_in", "tokens_out", "peer_tokens", "tokens_total", "cost_usd",
-    "wall_ms", "ms_agent", "ms_classify", "ms_extract", "ms_sql", "ms_kqml", "kqml_turns", "llm_calls",
+    "wall_ms", "ms_agent", "ms_classify", "ms_extract", "ms_sql", "ms_kqml", "kqml_turns", "kqml_sent", "kqml_received",
+    "llm_calls",
     "n_places", "n_years", "n_attributes", "fingerprint", "status", "http_status", "error",
     "started_at", "finished_at",
 ]

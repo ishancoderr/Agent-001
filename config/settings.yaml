@@ -121,6 +121,14 @@ auth:
   lockout_minutes: 10
   users_file: users.yaml        # in config/; USERS_FILE in .env overrides the path
 
+# ── Log files ────────────────────────────────────────────────────────────────
+# evaluation_metrics.log (every request, step by step) and the evaluator's
+# log go to <dir> (relative to the repository). Each file starts afresh every
+# day, and files older than keep_days are deleted automatically.
+logs:
+  dir: logs
+  keep_days: 2
+
 # ── Evaluator ────────────────────────────────────────────────────────────────
 # The test runner behind the workbench's Evaluation tab. Its "Start evaluator"
 # button asks this agent to start it (agent1/evaluation/evaluator_launcher.py)

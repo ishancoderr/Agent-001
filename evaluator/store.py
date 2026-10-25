@@ -30,6 +30,7 @@ SCORE_COLUMNS = [
     "answer_status", "answer_type", "answer_view", "fingerprint", "answer_summary",
     "tokens_in", "tokens_out", "peer_tokens", "tokens_total", "cost_usd",
     "llm_calls", "models_used", "ms_agent", "ms_classify", "ms_extract", "ms_sql", "ms_kqml", "kqml_turns",
+    "kqml_sent", "kqml_received",
     "n_places", "n_years", "n_attributes",
 ]
 _NUMERIC = {"category_ok", "extract_ok", "sql_steps", "sql_attempts", "sql_first_try_ok", "sql_passed_check",
@@ -99,6 +100,14 @@ def _connect() -> sqlite3.Connection:
 
 _con = _connect()
 _con.executescript(_SCHEMA)
+# A database made by an older version gets the columns added since (empty
+# until the run is rescored).
+_have = {r[1] for r in _con.execute("PRAGMA table_info(asks)")}
+for _col in SCORE_COLUMNS:
+    if _col not in _have:
+        _con.execute(f"ALTER TABLE asks ADD COLUMN {_col} "
+                     f"{'INTEGER' if _col in _NUMERIC else 'REAL' if _col.startswith(('ms_', 'cost')) else 'TEXT'}")
+_con.commit()
 
 
 @contextmanager

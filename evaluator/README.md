@@ -17,7 +17,7 @@ beyond the `trace` support it already has.
 
 In the workbench: **Evaluation tab → Start evaluator**. Agent-001 starts it as
 a separate background process (`agent1/evaluation/evaluator_launcher.py`,
-output in `evaluator/data/evaluator.log`); it keeps running when Agent-001
+output in `logs/evaluator.log`); it keeps running when Agent-001
 reloads or stops, and **Stop evaluator** ends it. Or from a terminal:
 
 ```bash
