@@ -25,9 +25,11 @@ repeats:
   default: 5
   per_model: {gpt-4: 1, claude-opus: 1}
 
-# Ask every question once of the peer as well (symmetry). The setup form can
-# turn it off per run.
+# Ask every question of the peer as well (symmetry), peer_repeats times; its
+# answers are compared with the primary's first answer. The setup form can
+# turn it off and change the count per run (1-20).
 symmetry: true
+peer_repeats: 1
 
 # One question can take minutes on the open-weight models.
 request_timeout_s: 900

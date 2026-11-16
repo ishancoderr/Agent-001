@@ -6,7 +6,7 @@ everything in a SQLite file, and gives it all back as CSV.
 
 ```
 browser ──/api/eval──► evaluator :8002 ──POST /query {"llm", "trace": true}──► Agent-001 :8000 ◄─KQML─► Agent-002 :8001
-                         │                                                    (symmetry: the same question, once, to Agent-002)
+                         │                                                    (symmetry: the same question, N times, to Agent-002)
                          └── evaluator/data/evaluation.sqlite
 ```
 
@@ -52,7 +52,7 @@ record (`agent1/evaluation/trace.py`) next to the answer. From it:
 | **Tokens** | input and output tokens of every LLM call on the asked agent, plus the tokens the peer spent answering its KQML asks (with the same model — the ask carries it). Cost = tokens × `pricing_usd_per_mtok` |
 | **Response time** | the whole question as the evaluator saw it (`wall_ms`), the agent's own total, and per step: classify, extract, SQL, KQML round trips. Every single call is in `steps.csv`; `n_places`, `n_years`, `n_attributes`, `sql_steps`, `kqml_turns` describe the question's complexity |
 | **Consistency** | each question is asked *repeats* times (5 by default, 1 for GPT-4 and Claude Opus — `settings.yaml`); consistency = share of the repeats that gave the most common answer |
-| **Symmetry** | each question is also sent once to Agent-002; symmetric = its answer equals Agent-001's first answer |
+| **Symmetry** | each question is also sent to Agent-002, 1 time by default (`settings.yaml` `peer_repeats`, or the count beside the symmetry box in step 1); symmetric = the share of Agent-002's answers that equal Agent-001's first answer — 1 or 0 when it is asked once |
 
 **The fingerprint.** Two answers are the same when they say the same thing:
 timings, tokens, request ids and *which agent supplied a row* are dropped
@@ -65,7 +65,9 @@ rounded vertex set. The keys and decimals are in `settings.yaml`
 ## In the tab
 
 1. **Step 1 · models** — tick the models (their ids are shown under the
-   names), set the repeats per model and symmetry on/off.
+   names), set the repeats per model, symmetry on/off and how many times
+   Agent-002 is asked. If Agent-002 is offline or a ticked model is not
+   configured on it, the reason is shown right under the symmetry box.
 2. **Step 2 · question set** — paste or upload a JSON list:
 
    ```json

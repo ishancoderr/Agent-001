@@ -11,13 +11,15 @@ Verdict on an answer (the final-answer correctness):
 
 Per question × model (primary agent's asks):
     consistency  share of the repeats that gave the most common answer
-    symmetric    the peer's answer equals the primary's first answer
+    symmetric    share of the peer's answers that equal the primary's first
+                 answer (1 or 0 when the peer is asked once)
 """
 from __future__ import annotations
 
 import csv
 import io
 import json
+import re
 import statistics
 from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional
@@ -143,12 +145,13 @@ def per_question(asks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
     for (model, qid), group in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1])):
         primary = sorted([a for a in group if a["agent"] == "primary"], key=lambda a: (a["run_id"], a["rep"]))
-        peer = [a for a in group if a["agent"] == "peer"]
+        peer = sorted([a for a in group if a["agent"] == "peer"], key=lambda a: (a["run_id"], a["rep"]))
         fps = [a["fingerprint"] for a in primary]
         first = primary[0] if primary else None
         sym = None
         if first and peer:
-            sym = int(peer[0]["fingerprint"] == first["fingerprint"])
+            same = sum(a["fingerprint"] == first["fingerprint"] for a in peer)
+            sym = int(same) if len(peer) == 1 else round(same / len(peer), 4)
         top = Counter(fps).most_common(1)[0][0] if fps else None
         out.append({
             "model": model, "qid": qid, "question": group[0]["question"],
@@ -267,6 +270,20 @@ def model_file(asks: List[Dict[str, Any]], model: str) -> List[Dict[str, Any]]:
     return rows
 
 
+# The agents and the fine-tuned models still emit DIRECT_LOOKUP; the exports
+# show it under its proper name.
+CATEGORY_NAMES = {"DIRECT_LOOKUP": "DATA_LOOKUP"}
+
+
+_CATEGORY_WORDS = re.compile(r"\b(" + "|".join(map(re.escape, CATEGORY_NAMES)) + r")\b")
+
+
+def _rename_categories(text: str) -> str:
+    """Every whole-word label in a cell: a category column, the JSON in
+    answer_view, the "status · type · …" of answer_summary."""
+    return _CATEGORY_WORDS.sub(lambda m: CATEGORY_NAMES[m.group(1)], text)
+
+
 def to_csv(rows: List[Dict[str, Any]], columns: Optional[List[str]] = None) -> str:
     if columns is None:
         columns = []
@@ -276,7 +293,8 @@ def to_csv(rows: List[Dict[str, Any]], columns: Optional[List[str]] = None) -> s
     w = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore", lineterminator="\n")
     w.writeheader()
     for r in rows:
-        w.writerow({k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list))
-                        else round(v, 4) if isinstance(v, float) else v)
+        w.writerow({k: (_rename_categories(json.dumps(v, ensure_ascii=False)) if isinstance(v, (dict, list))
+                        else round(v, 4) if isinstance(v, float)
+                        else _rename_categories(v) if isinstance(v, str) else v)
                     for k, v in r.items()})
     return "﻿" + buf.getvalue()           # BOM: Excel opens UTF-8 (ü, ß) correctly

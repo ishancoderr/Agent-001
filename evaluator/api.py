@@ -101,6 +101,7 @@ def setup(user: AuthUser = Depends(require_user)):
         "agents": {role: a["name"] for role, a in AGENTS.items()},
         "models": _models(user.username),
         "symmetry": bool(SETTINGS.get("symmetry", True)),
+        "peer_repeats": int(SETTINGS.get("peer_repeats", 1)),
         # The answer key, for "load the test set": the items carry only the
         # question and its id; the labels are taken from the key on the server.
         "test_set": [{"id": q["id"], "question": q["question"]} for q in load_questions()],
@@ -118,12 +119,14 @@ class RunPlan(BaseModel):
     models: List[ModelPlan] = Field(min_length=1)
     items: List[Item] = Field(min_length=1, max_length=5000)
     symmetry: bool = True
+    # How often each question is asked of the peer when symmetry is on.
+    peer_repeats: int = Field(1, ge=1, le=20)
 
 
 def _expand(plan: RunPlan, models: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """(questions, asks): the question set resolved against the ticked
     models, and every ask in the order they will run — model by model, per
-    question the repeats on the primary agent, then the peer once."""
+    question the repeats on the primary agent, then the peer's repeats."""
     ticked = [m.id for m in plan.models]
     questions = resolve(plan.items, models, ticked)
     asks = []
@@ -134,7 +137,8 @@ def _expand(plan: RunPlan, models: List[Dict[str, Any]]) -> Tuple[List[Dict[str,
             for rep in range(1, m.repeats + 1):
                 asks.append({**base, "agent": "primary", "agent_name": AGENTS["primary"]["name"], "rep": rep})
             if plan.symmetry:
-                asks.append({**base, "agent": "peer", "agent_name": AGENTS["peer"]["name"], "rep": 1})
+                for rep in range(1, plan.peer_repeats + 1):
+                    asks.append({**base, "agent": "peer", "agent_name": AGENTS["peer"]["name"], "rep": rep})
     if not asks:
         raise HTTPException(400, "no question runs on a ticked model")
     return questions, asks
@@ -186,7 +190,7 @@ def create_run(plan: RunPlan, user: AuthUser = Depends(require_user)):
     questions, asks = _expand(plan, listed)
     label = plan.label.strip() or ", ".join(models[m.id]["label"] for m in plan.models)
     stored = {"label": label, "models": [m.model_dump() for m in plan.models], "symmetry": plan.symmetry,
-              "resolved": questions}
+              "peer_repeats": plan.peer_repeats if plan.symmetry else 0, "resolved": questions}
     run_id = store.create_run(label, user.username, stored, asks)
     worker.poke()
     return _run_detail(run_id)
